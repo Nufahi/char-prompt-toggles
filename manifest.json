@@ -1,0 +1,15 @@
+{
+    "display_name": "Per-Character Prompt Toggles",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "Nufahi",
+    "version": "1.0.0",
+    "homePage": "https://github.com/Nufahi/ST-PerCharPromptToggles",
+    "auto_update": true,
+    "i18n": {
+        "ru-ru": "locales/ru-ru.json"
+    }
+}
