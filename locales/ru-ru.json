@@ -5,10 +5,13 @@
     "Search prompts...": "Поиск промптов...",
     "Search mode": "Режим поиска",
     "Clear": "Очистить",
-    "cpt_search_by_name": "Имя",
-    "cpt_search_by_tag": "XML-тег",
-    "cpt_search_by_both": "Имя + тег",
+    "Name": "Имя",
+    "XML tag": "XML-тег",
+    "Name + tag": "Имя + тег",
     "Duplicate": "Дублировать",
     "Delete": "Удалить",
-    "Delete prompt": "Удалить промпт"
+    "Delete prompt": "Удалить промпт",
+    "Prompt duplicated": "Промпт дублирован",
+    "Prompt deleted": "Промпт удалён",
+    "System prompts cannot be deleted": "Системные промпты нельзя удалить"
 }
