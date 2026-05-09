@@ -13,6 +13,10 @@ let searchQuery = '';
 let lastCharId = null;
 let pmObserver = null;
 
+// Cached resolved promptManager from /scripts/openai.js
+let cachedPromptManager = null;
+let openaiModulePromise = null;
+
 function getCurrentCharId() {
     const ctx = SillyTavern.getContext();
     if (ctx.groupId) return 'group_' + ctx.groupId;
@@ -149,29 +153,50 @@ function injectCharPanel() {
    PROMPT MANAGER ENHANCEMENTS: search, delete, duplicate
    ============================================================ */
 
-function getPromptManager() {
+/**
+ * Resolve the live PromptManager instance.
+ * Note: `SillyTavern.getContext()` does NOT expose `promptManager` (verified in
+ * st-context.js), so we must dynamically import openai.js where it lives as an
+ * exported `let promptManager`.
+ */
+async function resolvePromptManager() {
+    if (cachedPromptManager) return cachedPromptManager;
+    if (!openaiModulePromise) {
+        openaiModulePromise = import('/scripts/openai.js').catch((e) => {
+            console.warn('[' + MODULE_NAME + '] failed to import /scripts/openai.js, trying relative path', e);
+            // Fallback to relative path (extension is at /scripts/extensions/third-party/<name>/)
+            return import('../../../openai.js');
+        });
+    }
+    try {
+        const mod = await openaiModulePromise;
+        if (mod && mod.promptManager) {
+            cachedPromptManager = mod.promptManager;
+            return cachedPromptManager;
+        }
+    } catch (e) {
+        console.error('[' + MODULE_NAME + '] cannot import openai.js:', e);
+    }
+    return null;
+}
+
+function getOaiSettings() {
     try {
         const ctx = SillyTavern.getContext();
-        if (ctx && ctx.promptManager) return ctx.promptManager;
+        if (ctx && ctx.chatCompletionSettings && Array.isArray(ctx.chatCompletionSettings.prompts)) {
+            return ctx.chatCompletionSettings;
+        }
     } catch (e) {}
-    if (typeof window !== 'undefined' && window.promptManager) return window.promptManager;
     return null;
 }
 
 function getPromptsArray() {
-    const pm = getPromptManager();
-    if (pm && pm.serviceSettings && Array.isArray(pm.serviceSettings.prompts)) {
-        return pm.serviceSettings.prompts;
+    // Prefer live promptManager (always reflects what's on screen)
+    if (cachedPromptManager?.serviceSettings?.prompts) {
+        return cachedPromptManager.serviceSettings.prompts;
     }
-    try {
-        const ctx = SillyTavern.getContext();
-        if (ctx && ctx.oai_settings && Array.isArray(ctx.oai_settings.prompts)) {
-            return ctx.oai_settings.prompts;
-        }
-    } catch (e) {}
-    if (window.oai_settings && Array.isArray(window.oai_settings.prompts)) {
-        return window.oai_settings.prompts;
-    }
+    const oai = getOaiSettings();
+    if (oai && Array.isArray(oai.prompts)) return oai.prompts;
     return null;
 }
 
@@ -189,9 +214,8 @@ function getPromptNameFromDOM(li) {
     if (inspect && inspect.textContent) return inspect.textContent.trim();
     const attr = nameEl.getAttribute('data-pm-name');
     if (attr) return attr.trim();
-    // Fallback: take only direct text nodes (skip child icon spans)
     const clone = nameEl.cloneNode(true);
-    clone.querySelectorAll('span, small, i').forEach(n => n.remove());
+    clone.querySelectorAll('span, small, i, a').forEach(n => n.remove());
     return (clone.textContent || '').trim();
 }
 
@@ -199,14 +223,9 @@ function getTranslator() {
     try {
         const ctx = SillyTavern.getContext();
         if (typeof ctx?.translate === 'function') return ctx.translate;
+        if (typeof ctx?.t === 'function') return ctx.t;
     } catch (e) {}
     return (s) => s;
-}
-
-function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, (c) => ({
-        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-    })[c]);
 }
 
 function injectSearchToolbar() {
@@ -223,7 +242,7 @@ function injectSearchToolbar() {
         '<div class="cpt-pm-search-wrap">' +
         '  <span class="fa-solid fa-magnifying-glass cpt-pm-search-icon"></span>' +
         '  <input type="text" id="' + SEARCH_INPUT_ID + '" class="text_pole cpt-pm-search-input" placeholder="" autocomplete="off" />' +
-        '  <span id="' + SEARCH_CLEAR_ID + '" class="fa-solid fa-xmark cpt-pm-search-clear interactable" title=""></span>' +
+        '  <span id="' + SEARCH_CLEAR_ID + '" class="fa-solid fa-xmark cpt-pm-search-clear" title=""></span>' +
         '</div>';
 
     list.parentElement.insertBefore(toolbar, list);
@@ -274,8 +293,8 @@ function applySearchFilter() {
 function getUuid() {
     try {
         const ctx = SillyTavern.getContext();
-        if (typeof ctx?.getUuidv4 === 'function') return ctx.getUuidv4();
         if (typeof ctx?.uuidv4 === 'function') return ctx.uuidv4();
+        if (typeof ctx?.getUuidv4 === 'function') return ctx.getUuidv4();
     } catch (e) {}
     if (window.crypto?.randomUUID) return window.crypto.randomUUID();
     return 'cpt-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10);
@@ -297,16 +316,17 @@ async function confirmDialog(title, message) {
 }
 
 async function duplicatePrompt(identifier) {
-    const pm = getPromptManager();
+    const pm = await resolvePromptManager();
     const src = getPromptById(identifier);
     if (!pm || !src) {
-        toastr.error('Cannot duplicate: prompt not found', MODULE_NAME);
+        toastr.error('Cannot duplicate: prompt or PromptManager not found', MODULE_NAME);
         return;
     }
     try {
         const newId = getUuid();
         const copy = JSON.parse(JSON.stringify(src));
         copy.identifier = newId;
+        // Force not-system / not-marker so the user can edit/remove the duplicate.
         copy.system_prompt = false;
         copy.marker = false;
 
@@ -316,7 +336,7 @@ async function duplicatePrompt(identifier) {
             pm.serviceSettings.prompts.push(copy);
         }
 
-        // Append to active character order — places it at the top of the user list
+        // Add it to the active character's prompt order so it appears in the list.
         if (typeof pm.appendPrompt === 'function' && pm.activeCharacter) {
             pm.appendPrompt(copy, pm.activeCharacter);
         }
@@ -335,10 +355,10 @@ async function duplicatePrompt(identifier) {
 }
 
 async function deletePromptById(identifier) {
-    const pm = getPromptManager();
+    const pm = await resolvePromptManager();
     const src = getPromptById(identifier);
     if (!pm || !src) {
-        toastr.error('Cannot delete: prompt not found', MODULE_NAME);
+        toastr.error('Cannot delete: prompt or PromptManager not found', MODULE_NAME);
         return;
     }
     if (src.system_prompt) {
@@ -371,33 +391,32 @@ async function deletePromptById(identifier) {
 }
 
 /**
- * Inject Duplicate/Delete buttons into each user prompt row.
- *
- * Filtering by type-icon (fa-asterisk = regular prompt, fa-syringe = injection prompt,
- * fa-square-poll-horizontal = output formatting marker that is still user-editable).
- * Markers like fa-thumb-tack (charDescription/scenario/etc.) and fa-star (system) are skipped.
- * Reference: 酒馆助手脚本 "预设条目更多按钮" by 青空莉.
+ * Inject Duplicate/Delete buttons into eligible prompt rows.
+ * Filtering by type-icon (matches the approach of the working Chinese script
+ * 预设条目更多按钮 by 青空莉):
+ *   fa-asterisk            — user prompt        → can duplicate, can delete
+ *   fa-syringe             — injection prompt   → can duplicate, can delete
+ *   fa-square-poll-horizontal — system prompt   → can duplicate (no delete)
+ *   fa-thumb-tack / fa-star — markers/important → SKIP entirely
  */
 function injectRowActions() {
     const list = document.getElementById(PM_LIST_ID);
     if (!list) return;
     const t = getTranslator();
 
-    const eligibleSelector = 'li.completion_prompt_manager_prompt:has(.fa-asterisk), ' +
-                             'li.completion_prompt_manager_prompt:has(.fa-syringe), ' +
-                             'li.completion_prompt_manager_prompt:has(.fa-square-poll-horizontal)';
+    const rows = list.querySelectorAll('li.completion_prompt_manager_prompt[data-pm-identifier]');
+    rows.forEach(li => {
+        // Skip rows that are markers (charDescription/scenario/etc.)
+        if (li.querySelector(':scope > .completion_prompt_manager_prompt_name .fa-thumb-tack')) return;
+        // Skip "important" rows (forbid_overrides system prompts) — leave them alone
+        if (li.querySelector(':scope > .completion_prompt_manager_prompt_name .fa-star')) return;
 
-    let candidates;
-    try {
-        candidates = list.querySelectorAll(eligibleSelector);
-    } catch (e) {
-        // :has() not supported — fallback to all non-marker rows
-        candidates = list.querySelectorAll('li.completion_prompt_manager_prompt:not(.completion_prompt_manager_marker)');
-    }
+        const isUser = !!li.querySelector(':scope > .completion_prompt_manager_prompt_name .fa-asterisk');
+        const isInjection = !!li.querySelector(':scope > .completion_prompt_manager_prompt_name .fa-syringe');
+        const isSystem = !!li.querySelector(':scope > .completion_prompt_manager_prompt_name .fa-square-poll-horizontal');
 
-    candidates.forEach(li => {
-        const id = li.dataset.pmIdentifier;
-        if (!id) return;
+        if (!isUser && !isInjection && !isSystem) return;
+
         const controls = li.querySelector('.prompt_manager_prompt_controls');
         if (!controls) return;
         if (controls.querySelector('.cpt-row-actions')) return;
@@ -405,20 +424,20 @@ function injectRowActions() {
         const wrap = document.createElement('span');
         wrap.className = 'cpt-row-actions';
 
+        // Duplicate — always available for these types
         const dup = document.createElement('span');
-        dup.className = 'cpt-row-action cpt-row-duplicate fa-solid fa-copy fa-xs interactable';
+        dup.className = 'cpt-row-action cpt-row-duplicate fa-solid fa-copy fa-xs';
         dup.title = t('Duplicate');
-        dup.setAttribute('role', 'button');
-        dup.setAttribute('tabindex', '0');
-
-        const del = document.createElement('span');
-        del.className = 'cpt-row-action cpt-row-delete caution fa-solid fa-trash fa-xs interactable';
-        del.title = t('Delete');
-        del.setAttribute('role', 'button');
-        del.setAttribute('tabindex', '0');
-
         wrap.appendChild(dup);
-        wrap.appendChild(del);
+
+        // Delete — not for global/system prompts
+        if (!isSystem) {
+            const del = document.createElement('span');
+            del.className = 'cpt-row-action cpt-row-delete fa-solid fa-trash fa-xs caution';
+            del.title = t('Delete');
+            wrap.appendChild(del);
+        }
+
         controls.prepend(wrap);
     });
 }
@@ -431,7 +450,7 @@ function injectPMEnhancements() {
     applySearchFilter();
 }
 
-// Debounce — same approach as the Chinese script (500ms)
+// Same approach as the Chinese script: debounce, disconnect during reinjection.
 function debounce(fn, ms) {
     let timer = null;
     return function() {
@@ -454,7 +473,6 @@ const debouncedReinject = debounce(() => {
 function attachPMObserver() {
     const container = document.getElementById(PM_CONTAINER_ID);
     if (!container) {
-        // Fall back: watch body until the container appears
         if (!pmObserver) {
             pmObserver = new MutationObserver(() => {
                 const c = document.getElementById(PM_CONTAINER_ID);
@@ -471,11 +489,10 @@ function attachPMObserver() {
     }
     pmObserver = new MutationObserver(debouncedReinject);
     pmObserver.observe(container, { childList: true, subtree: true });
-    // Run once now
     injectPMEnhancements();
 }
 
-// Delegated click handler — survives full innerHTML rebuilds.
+// Delegated click handler — survives full innerHTML rebuilds of the prompt list.
 function setupDelegatedHandlers() {
     document.addEventListener('click', (ev) => {
         const target = ev.target;
@@ -505,6 +522,7 @@ function injectStyles() {
     if (document.getElementById('cpt-styles')) return;
     const style = document.createElement('style');
     style.id = 'cpt-styles';
+    // Note: no box-shadow, no transitions, minimal hover — to match ST native icons.
     style.textContent = `
         #${TOOLBAR_ID}.cpt-pm-toolbar {
             display: flex;
@@ -552,18 +570,15 @@ function injectStyles() {
         }
         .cpt-row-action {
             cursor: pointer;
-            opacity: 0.6;
-            padding: 2px 4px;
-            border-radius: 3px;
+            opacity: 0.65;
         }
         .cpt-row-action:hover { opacity: 1; }
-        .cpt-row-delete:hover { color: var(--crimson70a, #c0392b); }
 
         @media (max-width: 600px) {
             #${TOOLBAR_ID}.cpt-pm-toolbar { gap: 4px; }
             .cpt-row-actions { gap: 8px; margin-right: 6px; }
             .cpt-row-action {
-                padding: 5px 6px;
+                padding: 3px 4px;
                 font-size: 1.05em;
             }
         }
@@ -577,7 +592,12 @@ jQuery(async () => {
     try {
         injectStyles();
 
-        // Watch for char panel
+        // Eagerly resolve PromptManager so first click works without delay.
+        resolvePromptManager().then(pm => {
+            if (pm) console.log('[' + MODULE_NAME + '] promptManager resolved');
+            else console.warn('[' + MODULE_NAME + '] promptManager not resolved');
+        });
+
         const charPanelObserver = new MutationObserver(() => { injectCharPanel(); });
         charPanelObserver.observe(document.body, { childList: true, subtree: true });
         injectCharPanel();
