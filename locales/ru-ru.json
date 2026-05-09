@@ -1,5 +1,14 @@
 {
     "Prompt Toggles": "Тоглы промптов",
     "Save": "Сохранить",
-    "Ready": "Готово к работе"
+    "Ready": "Готово к работе",
+    "Search prompts...": "Поиск промптов...",
+    "Search mode": "Режим поиска",
+    "Clear": "Очистить",
+    "cpt_search_by_name": "Имя",
+    "cpt_search_by_tag": "XML-тег",
+    "cpt_search_by_both": "Имя + тег",
+    "Duplicate": "Дублировать",
+    "Delete": "Удалить",
+    "Delete prompt": "Удалить промпт"
 }
