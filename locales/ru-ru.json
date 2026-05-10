@@ -1,10 +1,16 @@
 {
     "Prompt Toggles": "Тоглы промптов",
-    "Save": "Сохранить",
+    "Save for char": "Сохранить для перса",
     "Ready": "Готово к работе",
     "Search prompts by name...": "Поиск промптов по имени...",
     "Clear": "Очистить",
     "Duplicate": "Дублировать",
     "Delete": "Удалить",
-    "Delete prompt": "Удалить промпт"
+    "Delete prompt": "Удалить промпт",
+    "Apply": "Применить",
+    "Overwrite": "Перезаписать",
+    "New profile": "Новый профиль",
+    "New profile name": "Имя нового профиля",
+    "Delete profile": "Удалить профиль",
+    "No profiles": "Нет профилей"
 }
