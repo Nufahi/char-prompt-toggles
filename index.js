@@ -8,6 +8,7 @@ const SEARCH_INPUT_ID = 'cpt_pm_search';
 const SEARCH_CLEAR_ID = 'cpt_pm_search_clear';
 
 let searchQuery = '';
+let selectedProfile = '';
 let lastCharId = null;
 let pmObserver = null;
 let cachedPromptManager = null;
@@ -167,18 +168,25 @@ function getProfileNames() {
 function profileSave(name) {
     if (!name) return;
     const toggles = readTogglesFromDOM();
-    if (Object.keys(toggles).length === 0) return;
+    if (Object.keys(toggles).length === 0) {
+        toastr.warning('Open Prompt Manager first', MODULE_NAME);
+        return;
+    }
     const profiles = getProfiles();
     profiles[name] = toggles;
     saveProfiles(profiles);
+    selectedProfile = name;
     refreshProfileUI();
+    toastr.success('Profile "' + name + '" saved (' + Object.keys(toggles).length + ' toggles)', MODULE_NAME);
 }
 
 function profileApply(name) {
     if (!name) return;
     const profiles = getProfiles();
     if (!profiles[name]) return;
-    applyTogglesToDOM(profiles[name]);
+    selectedProfile = name;
+    const applied = applyTogglesToDOM(profiles[name]);
+    toastr.info('Profile "' + name + '" applied (' + applied + ' changed)', MODULE_NAME);
 }
 
 function profileDelete(name) {
@@ -186,14 +194,15 @@ function profileDelete(name) {
     const profiles = getProfiles();
     delete profiles[name];
     saveProfiles(profiles);
+    if (selectedProfile === name) selectedProfile = '';
     refreshProfileUI();
+    toastr.success('Profile "' + name + '" deleted', MODULE_NAME);
 }
 
 function refreshProfileUI() {
     const sel = document.getElementById('cpt_profile_select');
     if (!sel) return;
     const names = getProfileNames();
-    const prev = sel.value;
     sel.innerHTML = '';
     if (names.length === 0) {
         const opt = document.createElement('option');
@@ -202,6 +211,7 @@ function refreshProfileUI() {
         opt.disabled = true;
         opt.selected = true;
         sel.appendChild(opt);
+        selectedProfile = '';
     } else {
         names.forEach(n => {
             const opt = document.createElement('option');
@@ -209,8 +219,15 @@ function refreshProfileUI() {
             opt.textContent = n;
             sel.appendChild(opt);
         });
-        if (names.includes(prev)) sel.value = prev;
+        // Restore previously selected profile
+        if (selectedProfile && names.includes(selectedProfile)) {
+            sel.value = selectedProfile;
+        } else {
+            selectedProfile = sel.value;
+        }
     }
+    // Track changes from the dropdown itself
+    sel.onchange = () => { selectedProfile = sel.value; };
 }
 
 /* ============================================================
@@ -294,33 +311,34 @@ function injectPMToolbar() {
     input.addEventListener('input', () => { searchQuery = input.value; applySearchFilter(); });
     clear.addEventListener('click', () => { input.value = ''; searchQuery = ''; applySearchFilter(); input.focus(); });
 
-    // Profile: Apply
+    // Profile: Apply — read from selectedProfile (persisted across re-renders)
     toolbar.querySelector('#cpt_profile_apply').addEventListener('click', () => {
-        const sel = document.getElementById('cpt_profile_select');
-        if (sel && sel.value) profileApply(sel.value);
+        const name = selectedProfile || document.getElementById('cpt_profile_select')?.value;
+        if (name) profileApply(name);
     });
 
     // Profile: Overwrite
     toolbar.querySelector('#cpt_profile_save').addEventListener('click', () => {
-        const sel = document.getElementById('cpt_profile_select');
-        if (sel && sel.value) profileSave(sel.value);
+        const name = selectedProfile || document.getElementById('cpt_profile_select')?.value;
+        if (name) profileSave(name);
     });
 
     // Profile: New
     toolbar.querySelector('#cpt_profile_new').addEventListener('click', () => {
         const name = window.prompt(t('New profile name'));
         if (!name || !name.trim()) return;
-        profileSave(name.trim());
-        const sel = document.getElementById('cpt_profile_select');
-        if (sel) sel.value = name.trim();
+        const trimmed = name.trim();
+        profileSave(trimmed);
+        selectedProfile = trimmed;
+        refreshProfileUI();
     });
 
     // Profile: Delete
     toolbar.querySelector('#cpt_profile_delete').addEventListener('click', () => {
-        const sel = document.getElementById('cpt_profile_select');
-        if (!sel || !sel.value) return;
-        if (!window.confirm(t('Delete profile') + ' "' + sel.value + '"?')) return;
-        profileDelete(sel.value);
+        const name = selectedProfile || document.getElementById('cpt_profile_select')?.value;
+        if (!name) return;
+        if (!window.confirm(t('Delete profile') + ' "' + name + '"?')) return;
+        profileDelete(name);
     });
 
     refreshProfileUI();
