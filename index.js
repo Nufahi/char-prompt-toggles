@@ -1,5 +1,6 @@
 const MODULE_NAME = 'char-prompt-toggles';
 const STORAGE_KEY = 'char_prompt_toggles_data';
+const SETTINGS_KEY = 'char_prompt_toggles_settings';
 
 const PM_CONTAINER_ID = 'completion_prompt_manager';
 const PM_LIST_ID = 'completion_prompt_manager_list';
@@ -14,6 +15,24 @@ let pmObserver = null;
 let cachedPromptManager = null;
 let openaiModulePromise = null;
 let actionInProgress = false;
+
+// Persisted settings (small separate key to avoid bloating the main storage reads)
+function loadSettings() {
+    try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}; }
+    catch(e) { return {}; }
+}
+function saveSettings(s) {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+}
+function getSetting(key, def) {
+    const s = loadSettings();
+    return key in s ? s[key] : def;
+}
+function setSetting(key, val) {
+    const s = loadSettings();
+    s[key] = val;
+    saveSettings(s);
+}
 
 /* ============================================================
    CORE HELPERS
@@ -165,6 +184,11 @@ function getProfileNames() {
     return Object.keys(getProfiles());
 }
 
+function setSelectedProfile(name) {
+    selectedProfile = name;
+    setSetting('selectedProfile', name);
+}
+
 function profileSave(name) {
     if (!name) return;
     const toggles = readTogglesFromDOM();
@@ -175,7 +199,7 @@ function profileSave(name) {
     const profiles = getProfiles();
     profiles[name] = toggles;
     saveProfiles(profiles);
-    selectedProfile = name;
+    setSelectedProfile(name);
     refreshProfileUI();
     toastr.success('Profile "' + escapeHtml(name) + '" saved (' + Object.keys(toggles).length + ' toggles)', MODULE_NAME);
 }
@@ -184,7 +208,7 @@ function profileApply(name) {
     if (!name) return;
     const profiles = getProfiles();
     if (!profiles[name]) return;
-    selectedProfile = name;
+    setSelectedProfile(name);
     const applied = applyTogglesToDOM(profiles[name]);
     toastr.info('Profile "' + escapeHtml(name) + '" applied (' + applied + ' changed)', MODULE_NAME);
 }
@@ -194,7 +218,7 @@ function profileDelete(name) {
     const profiles = getProfiles();
     delete profiles[name];
     saveProfiles(profiles);
-    if (selectedProfile === name) selectedProfile = '';
+    if (selectedProfile === name) setSelectedProfile('');
     refreshProfileUI();
     toastr.success('Profile "' + escapeHtml(name) + '" deleted', MODULE_NAME);
 }
@@ -211,7 +235,7 @@ function refreshProfileUI() {
         opt.disabled = true;
         opt.selected = true;
         sel.appendChild(opt);
-        selectedProfile = '';
+        setSelectedProfile('');
     } else {
         names.forEach(n => {
             const opt = document.createElement('option');
@@ -223,15 +247,93 @@ function refreshProfileUI() {
         if (selectedProfile && names.includes(selectedProfile)) {
             sel.value = selectedProfile;
         } else {
-            selectedProfile = sel.value;
+            setSelectedProfile(sel.value);
         }
     }
     // Track changes from the dropdown itself
-    sel.onchange = () => { selectedProfile = sel.value; };
+    sel.onchange = () => { setSelectedProfile(sel.value); };
 }
 
 /* ============================================================
-   CHARACTER PANEL (per-char save only, no profiles here)
+   CONTEXT UNLOCK LOCK
+   ============================================================ */
+
+const CTX_LOCK_KEY = 'lockContextUnlock';
+
+function isContextLockEnabled() {
+    return !!getSetting(CTX_LOCK_KEY, false);
+}
+
+function setContextLock(enabled) {
+    setSetting(CTX_LOCK_KEY, enabled);
+    applyContextLock();
+}
+
+function injectContextLockToggle() {
+    const cb = document.getElementById('oai_max_context_unlocked');
+    if (!cb) return;
+    // Already injected?
+    if (document.getElementById('cpt_lock_context')) return;
+
+    const label = cb.closest('label.checkbox_label');
+    if (!label) return;
+
+    const t = getTranslator();
+    const locked = isContextLockEnabled();
+
+    const btn = document.createElement('span');
+    btn.id = 'cpt_lock_context';
+    btn.className = 'cpt-ctx-lock fa-solid ' + (locked ? 'fa-lock' : 'fa-lock-open') + ' fa-xs';
+    btn.title = t('Lock context unlock');
+    btn.style.cssText = 'cursor:pointer;margin-left:6px;opacity:0.7;';
+    btn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const newState = !isContextLockEnabled();
+        setContextLock(newState);
+        btn.classList.toggle('fa-lock', newState);
+        btn.classList.toggle('fa-lock-open', !newState);
+        btn.style.opacity = newState ? '1' : '0.7';
+    });
+    if (locked) btn.style.opacity = '1';
+
+    label.appendChild(btn);
+    applyContextLock();
+}
+
+function applyContextLock() {
+    const cb = document.getElementById('oai_max_context_unlocked');
+    if (!cb) return;
+    const locked = isContextLockEnabled();
+    if (locked) {
+        if (cb.checked) {
+            cb.checked = false;
+            cb.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        cb.disabled = true;
+        cb.style.opacity = '0.4';
+        cb.style.pointerEvents = 'none';
+    } else {
+        cb.disabled = false;
+        cb.style.opacity = '';
+        cb.style.pointerEvents = '';
+    }
+}
+
+function setupContextLockGuard() {
+    const cb = document.getElementById('oai_max_context_unlocked');
+    if (!cb || cb._cptGuarded) return;
+    cb._cptGuarded = true;
+    cb.addEventListener('change', () => {
+        if (isContextLockEnabled() && cb.checked) {
+            cb.checked = false;
+            cb.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+    });
+}
+
+/* ============================================================
+   CHARACTER PANEL (per-char save only)
    ============================================================ */
 
 function injectCharPanel() {
@@ -298,7 +400,8 @@ function injectPMToolbar() {
             '<span id="cpt_profile_save" class="cpt-profile-btn fa-solid fa-floppy-disk fa-xs" title="' + escapeHtml(t('Save to profile')) + '"></span>' +
             '<span id="cpt_profile_new" class="cpt-profile-btn fa-solid fa-plus fa-xs" title="' + escapeHtml(t('New profile')) + '"></span>' +
             '<span id="cpt_profile_delete" class="cpt-profile-btn caution fa-solid fa-trash fa-xs" title="' + escapeHtml(t('Delete profile')) + '"></span>' +
-        '</div>';
+        '</div>' +
+;
 
     list.parentElement.insertBefore(toolbar, list);
 
@@ -329,7 +432,7 @@ function injectPMToolbar() {
         if (!name || !name.trim()) return;
         const trimmed = name.trim();
         profileSave(trimmed);
-        selectedProfile = trimmed;
+        setSelectedProfile(trimmed);
         refreshProfileUI();
     });
 
@@ -602,6 +705,8 @@ function injectStyles() {
         .cpt-row-action { cursor: pointer; opacity: 0.65; }
         .cpt-row-action:hover { opacity: 1; }
 
+        .cpt-ctx-lock:hover { opacity: 1 !important; }
+
         @media (max-width: 600px) {
             #${TOOLBAR_ID}.cpt-pm-toolbar { gap: 4px; }
             .cpt-pm-search-wrap { flex: 1 1 100%; }
@@ -624,14 +729,24 @@ jQuery(async () => {
     console.log('[' + MODULE_NAME + '] Loading...');
     try {
         injectStyles();
+
+        // Restore persisted selectedProfile
+        selectedProfile = getSetting('selectedProfile', '');
+
         resolvePromptManager().then(pm => {
             if (pm) console.log('[' + MODULE_NAME + '] promptManager resolved');
             else console.warn('[' + MODULE_NAME + '] promptManager not resolved');
         });
 
-        const charPanelObserver = new MutationObserver(debouncedInjectCharPanel);
+        const charPanelObserver = new MutationObserver(() => {
+            debouncedInjectCharPanel();
+            // Re-inject context lock icon if ST recreated the settings panel
+            injectContextLockToggle();
+        });
         charPanelObserver.observe(document.body, { childList: true, subtree: true });
         injectCharPanel();
+        injectContextLockToggle();
+        setupContextLockGuard();
 
         setupDelegatedHandlers();
         attachPMObserver();
