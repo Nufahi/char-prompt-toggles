@@ -177,7 +177,7 @@ function profileSave(name) {
     saveProfiles(profiles);
     selectedProfile = name;
     refreshProfileUI();
-    toastr.success('Profile "' + name + '" saved (' + Object.keys(toggles).length + ' toggles)', MODULE_NAME);
+    toastr.success('Profile "' + escapeHtml(name) + '" saved (' + Object.keys(toggles).length + ' toggles)', MODULE_NAME);
 }
 
 function profileApply(name) {
@@ -186,7 +186,7 @@ function profileApply(name) {
     if (!profiles[name]) return;
     selectedProfile = name;
     const applied = applyTogglesToDOM(profiles[name]);
-    toastr.info('Profile "' + name + '" applied (' + applied + ' changed)', MODULE_NAME);
+    toastr.info('Profile "' + escapeHtml(name) + '" applied (' + applied + ' changed)', MODULE_NAME);
 }
 
 function profileDelete(name) {
@@ -196,7 +196,7 @@ function profileDelete(name) {
     saveProfiles(profiles);
     if (selectedProfile === name) selectedProfile = '';
     refreshProfileUI();
-    toastr.success('Profile "' + name + '" deleted', MODULE_NAME);
+    toastr.success('Profile "' + escapeHtml(name) + '" deleted', MODULE_NAME);
 }
 
 function refreshProfileUI() {
@@ -434,7 +434,7 @@ async function duplicatePrompt(identifier) {
     try {
         const pm = await resolvePromptManager();
         const src = getPromptById(identifier);
-        if (!pm || !src) { console.error('[' + MODULE_NAME + '] duplicate: not found'); return; }
+        if (!pm || !src) { console.error('[' + MODULE_NAME + '] duplicate: not found'); actionInProgress = false; return; }
 
         const newId = getUuid();
         const copy = JSON.parse(JSON.stringify(src));
@@ -468,8 +468,8 @@ async function deletePromptById(identifier) {
     try {
         const pm = await resolvePromptManager();
         const src = getPromptById(identifier);
-        if (!pm || !src) { console.error('[' + MODULE_NAME + '] delete: not found'); return; }
-        if (src.system_prompt) return;
+        if (!pm || !src) { console.error('[' + MODULE_NAME + '] delete: not found'); actionInProgress = false; return; }
+        if (src.system_prompt) { actionInProgress = false; return; }
         const t = getTranslator();
         if (!(await confirmDialog(t('Delete prompt'), t('Delete prompt') + ' "' + escapeHtml(src.name || identifier) + '"?'))) return;
 
