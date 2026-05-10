@@ -12,8 +12,6 @@ let lastCharId = null;
 let pmObserver = null;
 let cachedPromptManager = null;
 let openaiModulePromise = null;
-
-// Guard against double-clicks on async actions
 let actionInProgress = false;
 
 /* ============================================================
@@ -102,13 +100,13 @@ function debounce(fn, ms) {
     };
 }
 
-/* ============================================================
-   PER-CHARACTER SAVE / RESTORE
-   ============================================================ */
-
 function isReservedKey(key) {
     return typeof key === 'string' && key.startsWith('_');
 }
+
+/* ============================================================
+   PER-CHARACTER SAVE / RESTORE
+   ============================================================ */
 
 function doSave() {
     const charId = getCurrentCharId();
@@ -135,10 +133,7 @@ function tryRestore(charId, attempt, maxAttempts) {
     const toggles = readTogglesFromDOM();
     if (Object.keys(toggles).length === 0) {
         if (attempt < maxAttempts) {
-            console.log('[' + MODULE_NAME + '] DOM not ready, retry ' + attempt + '/' + maxAttempts);
             setTimeout(function() { tryRestore(charId, attempt + 1, maxAttempts); }, 1000);
-        } else {
-            console.warn('[' + MODULE_NAME + '] Gave up waiting for toggles');
         }
         return;
     }
@@ -151,7 +146,7 @@ function tryRestore(charId, attempt, maxAttempts) {
 }
 
 /* ============================================================
-   GLOBAL PROFILES
+   GLOBAL PROFILES (stored under _profiles in localStorage)
    ============================================================ */
 
 function getProfiles() {
@@ -172,23 +167,18 @@ function getProfileNames() {
 function profileSave(name) {
     if (!name) return;
     const toggles = readTogglesFromDOM();
-    if (Object.keys(toggles).length === 0) {
-        updateStatus('Toggles not found — open Prompt Manager');
-        return;
-    }
+    if (Object.keys(toggles).length === 0) return;
     const profiles = getProfiles();
     profiles[name] = toggles;
     saveProfiles(profiles);
-    updateStatus('Profile "' + name + '": saved');
-    refreshProfileSelect();
+    refreshProfileUI();
 }
 
 function profileApply(name) {
     if (!name) return;
     const profiles = getProfiles();
     if (!profiles[name]) return;
-    const applied = applyTogglesToDOM(profiles[name]);
-    updateStatus('Profile "' + name + '": applied ' + applied + ' toggles');
+    applyTogglesToDOM(profiles[name]);
 }
 
 function profileDelete(name) {
@@ -196,11 +186,10 @@ function profileDelete(name) {
     const profiles = getProfiles();
     delete profiles[name];
     saveProfiles(profiles);
-    updateStatus('Profile "' + name + '": deleted');
-    refreshProfileSelect();
+    refreshProfileUI();
 }
 
-function refreshProfileSelect() {
+function refreshProfileUI() {
     const sel = document.getElementById('cpt_profile_select');
     if (!sel) return;
     const names = getProfileNames();
@@ -220,39 +209,16 @@ function refreshProfileSelect() {
             opt.textContent = n;
             sel.appendChild(opt);
         });
-        if (names.includes(prev)) {
-            sel.value = prev;
-        }
+        if (names.includes(prev)) sel.value = prev;
     }
 }
 
-async function promptForName(title, defaultVal) {
-    try {
-        const ctx = SillyTavern.getContext();
-        if (typeof ctx?.callGenericPopup === 'function' && ctx?.POPUP_TYPE) {
-            // Build input via DOM to avoid XSS from defaultVal
-            const safeDefault = escapeHtml(defaultVal || '');
-            const res = await ctx.callGenericPopup(
-                '<input id="cpt_popup_input" class="text_pole" type="text" value="' + safeDefault + '" />',
-                ctx.POPUP_TYPE.CONFIRM,
-                title || ''
-            );
-            if (!res) return null;
-            const input = document.getElementById('cpt_popup_input');
-            return input ? input.value.trim() : null;
-        }
-    } catch (e) {}
-    return (window.prompt(title, defaultVal) || '').trim() || null;
-}
-
 /* ============================================================
-   CHARACTER PANEL (with profiles UI)
+   CHARACTER PANEL (per-char save only, no profiles here)
    ============================================================ */
 
 function injectCharPanel() {
     if (document.getElementById('cpt_char_panel')) return;
-
-    const t = getTranslator();
 
     const panel = document.createElement('div');
     panel.id = 'cpt_char_panel';
@@ -265,27 +231,10 @@ function injectCharPanel() {
                 '<div class="inline-drawer-icon fa-solid fa-circle-chevron-up up interactable"></div>' +
             '</div>' +
             '<div class="inline-drawer-content" style="display:block;">' +
-                '<div class="flex-container" style="gap:6px;margin-bottom:8px;">' +
+                '<div class="flex-container" style="gap:6px;">' +
                     '<div id="cpt_char_save" class="menu_button" style="padding:5px 12px;cursor:pointer;font-size:12px;">' +
                         '<span class="fa-solid fa-floppy-disk" style="margin-right:4px;"></span>' +
                         '<span data-i18n="Save for char">Save for char</span>' +
-                    '</div>' +
-                '</div>' +
-                '<div class="cpt-profiles-section">' +
-                    '<div class="cpt-profiles-row">' +
-                        '<select id="cpt_profile_select" class="text_pole cpt-profile-select"></select>' +
-                        '<div id="cpt_profile_apply" class="menu_button cpt-profile-btn" title="' + escapeHtml(t('Apply')) + '">' +
-                            '<span class="fa-solid fa-check fa-xs"></span>' +
-                        '</div>' +
-                        '<div id="cpt_profile_save" class="menu_button cpt-profile-btn" title="' + escapeHtml(t('Overwrite')) + '">' +
-                            '<span class="fa-solid fa-floppy-disk fa-xs"></span>' +
-                        '</div>' +
-                        '<div id="cpt_profile_new" class="menu_button cpt-profile-btn" title="' + escapeHtml(t('New profile')) + '">' +
-                            '<span class="fa-solid fa-plus fa-xs"></span>' +
-                        '</div>' +
-                        '<div id="cpt_profile_delete" class="menu_button cpt-profile-btn caution" title="' + escapeHtml(t('Delete profile')) + '">' +
-                            '<span class="fa-solid fa-trash fa-xs"></span>' +
-                        '</div>' +
                     '</div>' +
                 '</div>' +
                 '<small id="cpt_status" style="display:block;margin-top:6px;opacity:0.7;" data-i18n="Ready">Ready</small>' +
@@ -295,49 +244,104 @@ function injectCharPanel() {
     const creatorsDiv = document.getElementById('creators_notes_div');
     if (creatorsDiv) {
         const drawer = creatorsDiv.closest('.inline-drawer');
-        if (drawer) {
-            drawer.before(panel);
-        }
+        if (drawer) drawer.before(panel);
     } else {
         const target = document.getElementById('form_create');
         if (target) target.appendChild(panel);
     }
 
     document.getElementById('cpt_char_save').addEventListener('click', doSave);
+}
 
-    document.getElementById('cpt_profile_apply').addEventListener('click', () => {
+/* ============================================================
+   PROMPT MANAGER TOOLBAR: search + profiles
+   ============================================================ */
+
+function injectPMToolbar() {
+    const list = document.getElementById(PM_LIST_ID);
+    if (!list) return false;
+    if (document.getElementById(TOOLBAR_ID)) return true;
+
+    const t = getTranslator();
+
+    const toolbar = document.createElement('div');
+    toolbar.id = TOOLBAR_ID;
+    toolbar.className = 'cpt-pm-toolbar';
+    toolbar.innerHTML =
+        // Search row
+        '<div class="cpt-pm-search-wrap">' +
+            '<span class="fa-solid fa-magnifying-glass cpt-pm-search-icon"></span>' +
+            '<input type="text" id="' + SEARCH_INPUT_ID + '" class="text_pole cpt-pm-search-input" placeholder="" autocomplete="off" />' +
+            '<span id="' + SEARCH_CLEAR_ID + '" class="fa-solid fa-xmark cpt-pm-search-clear" title=""></span>' +
+        '</div>' +
+        // Profiles row
+        '<div class="cpt-profiles-row">' +
+            '<select id="cpt_profile_select" class="text_pole cpt-profile-select"></select>' +
+            '<span id="cpt_profile_apply" class="cpt-profile-btn fa-solid fa-check fa-xs" title="' + escapeHtml(t('Apply profile')) + '"></span>' +
+            '<span id="cpt_profile_save" class="cpt-profile-btn fa-solid fa-floppy-disk fa-xs" title="' + escapeHtml(t('Save to profile')) + '"></span>' +
+            '<span id="cpt_profile_new" class="cpt-profile-btn fa-solid fa-plus fa-xs" title="' + escapeHtml(t('New profile')) + '"></span>' +
+            '<span id="cpt_profile_delete" class="cpt-profile-btn caution fa-solid fa-trash fa-xs" title="' + escapeHtml(t('Delete profile')) + '"></span>' +
+        '</div>';
+
+    list.parentElement.insertBefore(toolbar, list);
+
+    // Search
+    const input = toolbar.querySelector('#' + SEARCH_INPUT_ID);
+    const clear = toolbar.querySelector('#' + SEARCH_CLEAR_ID);
+    input.placeholder = t('Search prompts by name...');
+    clear.title = t('Clear');
+    if (searchQuery) input.value = searchQuery;
+    input.addEventListener('input', () => { searchQuery = input.value; applySearchFilter(); });
+    clear.addEventListener('click', () => { input.value = ''; searchQuery = ''; applySearchFilter(); input.focus(); });
+
+    // Profile: Apply
+    toolbar.querySelector('#cpt_profile_apply').addEventListener('click', () => {
         const sel = document.getElementById('cpt_profile_select');
         if (sel && sel.value) profileApply(sel.value);
     });
 
-    document.getElementById('cpt_profile_save').addEventListener('click', () => {
+    // Profile: Overwrite
+    toolbar.querySelector('#cpt_profile_save').addEventListener('click', () => {
         const sel = document.getElementById('cpt_profile_select');
         if (sel && sel.value) profileSave(sel.value);
     });
 
-    document.getElementById('cpt_profile_new').addEventListener('click', async () => {
-        const name = await promptForName(getTranslator()('New profile name'));
-        if (!name) return;
-        profileSave(name);
+    // Profile: New
+    toolbar.querySelector('#cpt_profile_new').addEventListener('click', () => {
+        const name = window.prompt(t('New profile name'));
+        if (!name || !name.trim()) return;
+        profileSave(name.trim());
         const sel = document.getElementById('cpt_profile_select');
-        if (sel) sel.value = name;
+        if (sel) sel.value = name.trim();
     });
 
-    document.getElementById('cpt_profile_delete').addEventListener('click', async () => {
+    // Profile: Delete
+    toolbar.querySelector('#cpt_profile_delete').addEventListener('click', () => {
         const sel = document.getElementById('cpt_profile_select');
         if (!sel || !sel.value) return;
-        const confirmed = await confirmDialog(
-            getTranslator()('Delete profile'),
-            getTranslator()('Delete profile') + ' "' + escapeHtml(sel.value) + '"?'
-        );
-        if (confirmed) profileDelete(sel.value);
+        if (!window.confirm(t('Delete profile') + ' "' + sel.value + '"?')) return;
+        profileDelete(sel.value);
     });
 
-    refreshProfileSelect();
+    refreshProfileUI();
+    return true;
+}
+
+function applySearchFilter() {
+    const list = document.getElementById(PM_LIST_ID);
+    if (!list) return;
+    const q = (searchQuery || '').trim().toLowerCase();
+    list.querySelectorAll('li[data-pm-identifier]').forEach(li => {
+        if (!q) { li.style.display = ''; return; }
+        const id = li.dataset.pmIdentifier;
+        const p = getPromptById(id);
+        const name = ((p && typeof p.name === 'string') ? p.name : getPromptNameFromDOM(li)).toLowerCase();
+        li.style.display = name.includes(q) ? '' : 'none';
+    });
 }
 
 /* ============================================================
-   PROMPT MANAGER ENHANCEMENTS: search, delete, duplicate
+   PROMPT MANAGER: duplicate, delete, row actions
    ============================================================ */
 
 async function resolvePromptManager() {
@@ -361,9 +365,7 @@ async function resolvePromptManager() {
 }
 
 function getPromptsArray() {
-    if (cachedPromptManager?.serviceSettings?.prompts) {
-        return cachedPromptManager.serviceSettings.prompts;
-    }
+    if (cachedPromptManager?.serviceSettings?.prompts) return cachedPromptManager.serviceSettings.prompts;
     try {
         const ctx = SillyTavern.getContext();
         if (ctx?.chatCompletionSettings?.prompts) return ctx.chatCompletionSettings.prompts;
@@ -388,48 +390,6 @@ function getPromptNameFromDOM(li) {
     const clone = nameEl.cloneNode(true);
     clone.querySelectorAll('span, small, i, a').forEach(n => n.remove());
     return (clone.textContent || '').trim();
-}
-
-function injectSearchToolbar() {
-    const list = document.getElementById(PM_LIST_ID);
-    if (!list) return false;
-    if (document.getElementById(TOOLBAR_ID)) return true;
-
-    const t = getTranslator();
-    const toolbar = document.createElement('div');
-    toolbar.id = TOOLBAR_ID;
-    toolbar.className = 'cpt-pm-toolbar';
-    toolbar.innerHTML =
-        '<div class="cpt-pm-search-wrap">' +
-        '  <span class="fa-solid fa-magnifying-glass cpt-pm-search-icon"></span>' +
-        '  <input type="text" id="' + SEARCH_INPUT_ID + '" class="text_pole cpt-pm-search-input" placeholder="" autocomplete="off" />' +
-        '  <span id="' + SEARCH_CLEAR_ID + '" class="fa-solid fa-xmark cpt-pm-search-clear" title=""></span>' +
-        '</div>';
-
-    list.parentElement.insertBefore(toolbar, list);
-
-    const input = toolbar.querySelector('#' + SEARCH_INPUT_ID);
-    const clear = toolbar.querySelector('#' + SEARCH_CLEAR_ID);
-    input.placeholder = t('Search prompts by name...');
-    clear.title = t('Clear');
-    if (searchQuery) input.value = searchQuery;
-
-    input.addEventListener('input', () => { searchQuery = input.value; applySearchFilter(); });
-    clear.addEventListener('click', () => { input.value = ''; searchQuery = ''; applySearchFilter(); input.focus(); });
-    return true;
-}
-
-function applySearchFilter() {
-    const list = document.getElementById(PM_LIST_ID);
-    if (!list) return;
-    const q = (searchQuery || '').trim().toLowerCase();
-    list.querySelectorAll('li[data-pm-identifier]').forEach(li => {
-        if (!q) { li.style.display = ''; return; }
-        const id = li.dataset.pmIdentifier;
-        const p = getPromptById(id);
-        const name = ((p && typeof p.name === 'string') ? p.name : getPromptNameFromDOM(li)).toLowerCase();
-        li.style.display = name.includes(q) ? '' : 'none';
-    });
 }
 
 function getUuid() {
@@ -464,8 +424,8 @@ async function duplicatePrompt(identifier) {
         copy.system_prompt = false;
         copy.marker = false;
 
-        if (typeof pm.addPrompt === 'function') { pm.addPrompt(copy, newId); }
-        else if (Array.isArray(pm.serviceSettings?.prompts)) { pm.serviceSettings.prompts.push(copy); }
+        if (typeof pm.addPrompt === 'function') pm.addPrompt(copy, newId);
+        else if (Array.isArray(pm.serviceSettings?.prompts)) pm.serviceSettings.prompts.push(copy);
 
         if (pm.activeCharacter && typeof pm.getPromptOrderForCharacter === 'function') {
             const order = pm.getPromptOrderForCharacter(pm.activeCharacter);
@@ -473,18 +433,15 @@ async function duplicatePrompt(identifier) {
                 const srcIdx = order.findIndex(e => e && e.identifier === identifier);
                 const srcEntry = srcIdx !== -1 ? order[srcIdx] : null;
                 const newEntry = { identifier: newId, enabled: srcEntry ? !!srcEntry.enabled : false };
-                if (srcIdx !== -1) { order.splice(srcIdx + 1, 0, newEntry); }
-                else { order.push(newEntry); }
-            } else if (typeof pm.appendPrompt === 'function') { pm.appendPrompt(copy, pm.activeCharacter); }
-        } else if (typeof pm.appendPrompt === 'function' && pm.activeCharacter) { pm.appendPrompt(copy, pm.activeCharacter); }
+                if (srcIdx !== -1) order.splice(srcIdx + 1, 0, newEntry);
+                else order.push(newEntry);
+            } else if (typeof pm.appendPrompt === 'function') pm.appendPrompt(copy, pm.activeCharacter);
+        } else if (typeof pm.appendPrompt === 'function' && pm.activeCharacter) pm.appendPrompt(copy, pm.activeCharacter);
 
         if (typeof pm.saveServiceSettings === 'function') await pm.saveServiceSettings();
         if (typeof pm.render === 'function') pm.render();
-    } catch (e) {
-        console.error('[' + MODULE_NAME + '] duplicate failed:', e);
-    } finally {
-        actionInProgress = false;
-    }
+    } catch (e) { console.error('[' + MODULE_NAME + '] duplicate failed:', e); }
+    finally { actionInProgress = false; }
 }
 
 async function deletePromptById(identifier) {
@@ -505,11 +462,8 @@ async function deletePromptById(identifier) {
         }
         if (typeof pm.saveServiceSettings === 'function') await pm.saveServiceSettings();
         if (typeof pm.render === 'function') pm.render();
-    } catch (e) {
-        console.error('[' + MODULE_NAME + '] delete failed:', e);
-    } finally {
-        actionInProgress = false;
-    }
+    } catch (e) { console.error('[' + MODULE_NAME + '] delete failed:', e); }
+    finally { actionInProgress = false; }
 }
 
 function injectRowActions() {
@@ -544,7 +498,7 @@ function injectRowActions() {
 function injectPMEnhancements() {
     const list = document.getElementById(PM_LIST_ID);
     if (!list) return;
-    injectSearchToolbar();
+    injectPMToolbar();
     injectRowActions();
     applySearchFilter();
 }
@@ -595,7 +549,7 @@ function injectStyles() {
             margin: 6px 0 8px 0; flex-wrap: wrap;
         }
         .cpt-pm-search-wrap {
-            position: relative; flex: 1 1 auto; min-width: 0;
+            position: relative; flex: 1 1 150px; min-width: 0;
             display: flex; align-items: center;
         }
         .cpt-pm-search-icon {
@@ -613,29 +567,30 @@ function injectStyles() {
         }
         .cpt-pm-search-clear:hover { opacity: 1; }
 
-        .cpt-row-actions { display: inline-flex; gap: 6px; align-items: center; margin-right: 4px; vertical-align: middle; }
-        .cpt-row-action { cursor: pointer; opacity: 0.65; }
-        .cpt-row-action:hover { opacity: 1; }
-
-        .cpt-profiles-section { margin-bottom: 4px; }
         .cpt-profiles-row {
-            display: flex; gap: 4px; align-items: center; flex-wrap: nowrap;
+            display: flex; gap: 4px; align-items: center;
+            flex: 1 1 150px; min-width: 0;
         }
         .cpt-profile-select {
             flex: 1 1 auto; min-width: 0;
             font-size: 12px; padding: 3px 6px;
         }
         .cpt-profile-btn {
-            flex: 0 0 auto; padding: 4px 8px; cursor: pointer; font-size: 12px;
+            cursor: pointer; opacity: 0.65; padding: 2px 4px;
         }
+        .cpt-profile-btn:hover { opacity: 1; }
+
+        .cpt-row-actions { display: inline-flex; gap: 6px; align-items: center; margin-right: 4px; vertical-align: middle; }
+        .cpt-row-action { cursor: pointer; opacity: 0.65; }
+        .cpt-row-action:hover { opacity: 1; }
 
         @media (max-width: 600px) {
             #${TOOLBAR_ID}.cpt-pm-toolbar { gap: 4px; }
+            .cpt-pm-search-wrap { flex: 1 1 100%; }
+            .cpt-profiles-row { flex: 1 1 100%; }
             .cpt-row-actions { gap: 8px; margin-right: 6px; }
             .cpt-row-action { padding: 3px 4px; font-size: 1.05em; }
-            .cpt-profiles-row { flex-wrap: wrap; }
-            .cpt-profile-select { flex: 1 1 100%; }
-            .cpt-profile-btn { padding: 6px 10px; font-size: 13px; }
+            .cpt-profile-btn { padding: 4px 6px; font-size: 1.05em; }
         }
     `;
     document.head.appendChild(style);
@@ -645,8 +600,6 @@ function injectStyles() {
    INIT
    ============================================================ */
 
-// Debounced version for the char panel observer — avoids calling injectCharPanel
-// on every single DOM mutation
 const debouncedInjectCharPanel = debounce(() => { injectCharPanel(); }, 500);
 
 jQuery(async () => {
@@ -667,7 +620,6 @@ jQuery(async () => {
 
         const { eventSource, event_types } = SillyTavern.getContext();
 
-        // Try to restore for the character that's already open when extension loads
         const initialCharId = getCurrentCharId();
         if (initialCharId) {
             lastCharId = initialCharId;
@@ -680,7 +632,6 @@ jQuery(async () => {
             const newCharId = getCurrentCharId();
             const shouldRestore = (lastCharId !== null && newCharId !== null && newCharId !== lastCharId);
             if (newCharId !== null) lastCharId = newCharId;
-            console.log('[' + MODULE_NAME + '] CHAT_CHANGED -> restore=' + shouldRestore + ', char=' + newCharId);
             setTimeout(() => {
                 injectCharPanel();
                 debouncedReinject();
