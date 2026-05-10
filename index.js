@@ -77,15 +77,20 @@ function updateStatus(text) {
 
 function doSave() {
     const charId = getCurrentCharId();
-    if (!charId) { toastr.error('No active character', MODULE_NAME); return; }
+    if (!charId) {
+        updateStatus('No active character');
+        return;
+    }
     const toggles = readTogglesFromDOM();
     const count = Object.keys(toggles).length;
-    if (count === 0) { toastr.warning('Toggles not found -- open Prompt Manager!', MODULE_NAME); return; }
+    if (count === 0) {
+        updateStatus('Toggles not found — open Prompt Manager');
+        return;
+    }
     const data = loadStorage();
     data[charId] = toggles;
     saveStorage(data);
     updateStatus(getCharName() + ': saved ' + count + ' toggles');
-    toastr.success(getCharName() + ': saved ' + count + ' toggles', MODULE_NAME);
 }
 
 function tryRestore(charId, attempt, maxAttempts) {
@@ -106,7 +111,6 @@ function tryRestore(charId, attempt, maxAttempts) {
     const applied = applyTogglesToDOM(data[charId]);
     if (applied > 0) {
         updateStatus(getCharName() + ': auto-restored ' + applied + ' toggles');
-        toastr.info(getCharName() + ': restored ' + applied + ' toggles', MODULE_NAME);
     }
 }
 
@@ -319,7 +323,7 @@ async function duplicatePrompt(identifier) {
     const pm = await resolvePromptManager();
     const src = getPromptById(identifier);
     if (!pm || !src) {
-        toastr.error('Cannot duplicate: prompt or PromptManager not found', MODULE_NAME);
+        console.error('[' + MODULE_NAME + '] duplicate: prompt or PromptManager not found');
         return;
     }
     try {
@@ -330,14 +334,35 @@ async function duplicatePrompt(identifier) {
         copy.system_prompt = false;
         copy.marker = false;
 
+        // 1. Add the cloned prompt to the global prompts list.
         if (typeof pm.addPrompt === 'function') {
             pm.addPrompt(copy, newId);
         } else if (Array.isArray(pm.serviceSettings?.prompts)) {
             pm.serviceSettings.prompts.push(copy);
         }
 
-        // Add it to the active character's prompt order so it appears in the list.
-        if (typeof pm.appendPrompt === 'function' && pm.activeCharacter) {
+        // 2. Insert the order entry directly AFTER the original (instead of pm.appendPrompt
+        //    which unshifts to the top of the list — which is what was making copies fly up).
+        if (pm.activeCharacter && typeof pm.getPromptOrderForCharacter === 'function') {
+            const order = pm.getPromptOrderForCharacter(pm.activeCharacter);
+            if (Array.isArray(order)) {
+                const srcIdx = order.findIndex(e => e && e.identifier === identifier);
+                const srcEntry = srcIdx !== -1 ? order[srcIdx] : null;
+                const newEntry = {
+                    identifier: newId,
+                    // mirror enabled state of the original so copy behaves predictably
+                    enabled: srcEntry ? !!srcEntry.enabled : false,
+                };
+                if (srcIdx !== -1) {
+                    order.splice(srcIdx + 1, 0, newEntry);
+                } else {
+                    order.push(newEntry);
+                }
+            } else if (typeof pm.appendPrompt === 'function') {
+                // fallback only if we couldn't access the order array
+                pm.appendPrompt(copy, pm.activeCharacter);
+            }
+        } else if (typeof pm.appendPrompt === 'function' && pm.activeCharacter) {
             pm.appendPrompt(copy, pm.activeCharacter);
         }
 
@@ -347,10 +372,8 @@ async function duplicatePrompt(identifier) {
         if (typeof pm.render === 'function') {
             pm.render();
         }
-        toastr.success(getTranslator()('Prompt duplicated'), MODULE_NAME);
     } catch (e) {
         console.error('[' + MODULE_NAME + '] duplicate failed:', e);
-        toastr.error('Duplicate failed: ' + e.message, MODULE_NAME);
     }
 }
 
@@ -358,11 +381,11 @@ async function deletePromptById(identifier) {
     const pm = await resolvePromptManager();
     const src = getPromptById(identifier);
     if (!pm || !src) {
-        toastr.error('Cannot delete: prompt or PromptManager not found', MODULE_NAME);
+        console.error('[' + MODULE_NAME + '] delete: prompt or PromptManager not found');
         return;
     }
     if (src.system_prompt) {
-        toastr.warning(getTranslator()('System prompts cannot be deleted'), MODULE_NAME);
+        // Silently refuse — UI shouldn't expose Delete for system prompts anyway.
         return;
     }
     const t = getTranslator();
@@ -383,10 +406,8 @@ async function deletePromptById(identifier) {
         if (typeof pm.render === 'function') {
             pm.render();
         }
-        toastr.success(t('Prompt deleted'), MODULE_NAME);
     } catch (e) {
         console.error('[' + MODULE_NAME + '] delete failed:', e);
-        toastr.error('Delete failed: ' + e.message, MODULE_NAME);
     }
 }
 

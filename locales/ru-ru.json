@@ -6,8 +6,5 @@
     "Clear": "Очистить",
     "Duplicate": "Дублировать",
     "Delete": "Удалить",
-    "Delete prompt": "Удалить промпт",
-    "Prompt duplicated": "Промпт дублирован",
-    "Prompt deleted": "Промпт удалён",
-    "System prompts cannot be deleted": "Системные промпты нельзя удалить"
+    "Delete prompt": "Удалить промпт"
 }
