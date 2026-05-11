@@ -804,20 +804,20 @@ jQuery(async () => {
         const initialCharId = getCurrentCharId();
         if (initialCharId) {
             lastCharId = initialCharId;
-            setTimeout(() => tryRestore(initialCharId), 2000);
+            setTimeout(() => tryRestore(initialCharId), 3000);
         }
 
         eventSource.on(event_types.CHAT_CHANGED, () => {
             const old = document.getElementById('cpt_char_panel');
             if (old) old.remove();
             const newCharId = getCurrentCharId();
-            const shouldRestore = (lastCharId !== null && newCharId !== null && newCharId !== lastCharId);
             if (newCharId !== null) lastCharId = newCharId;
             setTimeout(() => {
                 injectCharPanel();
                 debouncedReinject();
-                if (shouldRestore) tryRestore(newCharId);
-            }, 1500);
+                // Always try to restore — even if same char (e.g. page reload, chat switch)
+                if (newCharId) tryRestore(newCharId);
+            }, 2000);
         });
 
         console.log('[' + MODULE_NAME + '] Loaded successfully');
