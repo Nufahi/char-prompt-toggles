@@ -624,47 +624,52 @@ function injectPMEnhancements() {
 }
 
 /**
- * Smart check: only reinject if our elements are actually missing.
- * This prevents the observer from doing DOM work on every toggle click.
+ * Lightweight check + inject. Called after ST renders the prompt list.
+ * No MutationObserver on the PM container — instead we hook into pm.render
+ * and ST events that trigger re-renders.
  */
-function needsReinject() {
-    const list = document.getElementById(PM_LIST_ID);
-    if (!list) return false;
-    // Toolbar missing?
-    if (!document.getElementById(TOOLBAR_ID)) return true;
-    // Any prompt row exists but has no row-actions?
-    const firstRow = list.querySelector('li.completion_prompt_manager_prompt:not(.completion_prompt_manager_marker) .prompt_manager_prompt_controls');
-    if (firstRow && !firstRow.querySelector('.cpt-row-actions')) return true;
-    return false;
+const debouncedReinject = debounce(() => {
+    injectPMEnhancements();
+}, 400);
+
+/**
+ * Monkey-patch pm.render so we reinject after each ST re-render.
+ * This completely replaces MutationObserver on the PM container.
+ */
+let renderPatched = false;
+function patchPromptManagerRender(pm) {
+    if (!pm || renderPatched) return;
+    const origRender = pm.render.bind(pm);
+    pm.render = function() {
+        const result = origRender.apply(this, arguments);
+        // pm.render is async internally (uses waitUntilCondition + renderPromptManagerListItems)
+        // Schedule our reinject after ST finishes rebuilding the DOM
+        setTimeout(debouncedReinject, 600);
+        return result;
+    };
+    renderPatched = true;
+    console.log('[' + MODULE_NAME + '] pm.render patched');
 }
 
-const debouncedReinject = debounce(() => {
-    if (!needsReinject()) return;
-    if (pmObserver) pmObserver.disconnect();
-    try { injectPMEnhancements(); } finally { attachPMObserver(); }
-}, 500);
-
-function attachPMObserver() {
-    const container = document.getElementById(PM_CONTAINER_ID);
-    if (!container) {
-        if (!pmObserver) {
-            pmObserver = new MutationObserver(() => {
-                if (document.getElementById(PM_CONTAINER_ID)) { pmObserver.disconnect(); pmObserver = null; attachPMObserver(); debouncedReinject(); }
-            });
-            pmObserver.observe(document.body, { childList: true, subtree: true });
-        }
+/**
+ * Fallback: a single one-shot MutationObserver that waits for the PM container
+ * to appear in the DOM (it may not exist at extension load time). Once found,
+ * it disconnects and does the initial inject + patches pm.render.
+ */
+function waitForPMContainer() {
+    if (document.getElementById(PM_LIST_ID)) {
+        injectPMEnhancements();
         return;
     }
-    // Only watch childList on the container, NOT subtree — avoids firing on
-    // every toggle-class change / token-count update inside <li> elements.
-    pmObserver = new MutationObserver(debouncedReinject);
-    pmObserver.observe(container, { childList: true, subtree: false });
-    // Also watch the <ul> itself for childList (ST replaces its innerHTML)
-    const list = document.getElementById(PM_LIST_ID);
-    if (list) {
-        pmObserver.observe(list, { childList: true, subtree: false });
-    }
-    injectPMEnhancements();
+    if (pmObserver) return;
+    pmObserver = new MutationObserver(() => {
+        if (document.getElementById(PM_LIST_ID)) {
+            pmObserver.disconnect();
+            pmObserver = null;
+            injectPMEnhancements();
+        }
+    });
+    pmObserver.observe(document.body, { childList: true, subtree: true });
 }
 
 function setupDelegatedHandlers() {
@@ -759,11 +764,6 @@ jQuery(async () => {
         // Restore persisted selectedProfile
         selectedProfile = getSetting('selectedProfile', '');
 
-        resolvePromptManager().then(pm => {
-            if (pm) console.log('[' + MODULE_NAME + '] promptManager resolved');
-            else console.warn('[' + MODULE_NAME + '] promptManager not resolved');
-        });
-
         const charPanelObserver = new MutationObserver(() => {
             debouncedInjectCharPanel();
             debouncedContextLock();
@@ -774,9 +774,32 @@ jQuery(async () => {
         setupContextLockGuard();
 
         setupDelegatedHandlers();
-        attachPMObserver();
+
+        // Patch pm.render once resolved (main mechanism for reinject — no MutationObserver)
+        resolvePromptManager().then(pm => {
+            if (pm) {
+                patchPromptManagerRender(pm);
+                console.log('[' + MODULE_NAME + '] promptManager resolved');
+            } else {
+                console.warn('[' + MODULE_NAME + '] promptManager not resolved');
+            }
+        });
+
+        // Fallback: wait for PM container if it doesn't exist yet
+        waitForPMContainer();
 
         const { eventSource, event_types } = SillyTavern.getContext();
+
+        // ST events that cause PM re-renders — reinject after each
+        const reinjectEvents = [
+            event_types.OAI_PRESET_CHANGED_AFTER,
+            event_types.CHAT_LOADED,
+            event_types.CHATCOMPLETION_SOURCE_CHANGED,
+            event_types.CHATCOMPLETION_MODEL_CHANGED,
+        ];
+        reinjectEvents.forEach(evt => {
+            if (evt) eventSource.on(evt, () => setTimeout(debouncedReinject, 800));
+        });
 
         const initialCharId = getCurrentCharId();
         if (initialCharId) {
