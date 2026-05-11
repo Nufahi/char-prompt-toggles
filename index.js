@@ -623,10 +623,26 @@ function injectPMEnhancements() {
     applySearchFilter();
 }
 
+/**
+ * Smart check: only reinject if our elements are actually missing.
+ * This prevents the observer from doing DOM work on every toggle click.
+ */
+function needsReinject() {
+    const list = document.getElementById(PM_LIST_ID);
+    if (!list) return false;
+    // Toolbar missing?
+    if (!document.getElementById(TOOLBAR_ID)) return true;
+    // Any prompt row exists but has no row-actions?
+    const firstRow = list.querySelector('li.completion_prompt_manager_prompt:not(.completion_prompt_manager_marker) .prompt_manager_prompt_controls');
+    if (firstRow && !firstRow.querySelector('.cpt-row-actions')) return true;
+    return false;
+}
+
 const debouncedReinject = debounce(() => {
+    if (!needsReinject()) return;
     if (pmObserver) pmObserver.disconnect();
     try { injectPMEnhancements(); } finally { attachPMObserver(); }
-}, 300);
+}, 500);
 
 function attachPMObserver() {
     const container = document.getElementById(PM_CONTAINER_ID);
@@ -639,8 +655,15 @@ function attachPMObserver() {
         }
         return;
     }
+    // Only watch childList on the container, NOT subtree — avoids firing on
+    // every toggle-class change / token-count update inside <li> elements.
     pmObserver = new MutationObserver(debouncedReinject);
-    pmObserver.observe(container, { childList: true, subtree: true });
+    pmObserver.observe(container, { childList: true, subtree: false });
+    // Also watch the <ul> itself for childList (ST replaces its innerHTML)
+    const list = document.getElementById(PM_LIST_ID);
+    if (list) {
+        pmObserver.observe(list, { childList: true, subtree: false });
+    }
     injectPMEnhancements();
 }
 
@@ -723,6 +746,10 @@ function injectStyles() {
    ============================================================ */
 
 const debouncedInjectCharPanel = debounce(() => { injectCharPanel(); }, 500);
+const debouncedContextLock = debounce(() => {
+    injectContextLockToggle();
+    setupContextLockGuard();
+}, 1000);
 
 jQuery(async () => {
     console.log('[' + MODULE_NAME + '] Loading...');
@@ -739,8 +766,7 @@ jQuery(async () => {
 
         const charPanelObserver = new MutationObserver(() => {
             debouncedInjectCharPanel();
-            // Re-inject context lock icon if ST recreated the settings panel
-            injectContextLockToggle();
+            debouncedContextLock();
         });
         charPanelObserver.observe(document.body, { childList: true, subtree: true });
         injectCharPanel();
