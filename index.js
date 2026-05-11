@@ -801,22 +801,24 @@ jQuery(async () => {
             if (evt) eventSource.on(evt, () => setTimeout(debouncedReinject, 800));
         });
 
+        // Remember who's open now — but do NOT auto-restore on page load.
+        // Restore only triggers when switching FROM one char TO another.
         const initialCharId = getCurrentCharId();
         if (initialCharId) {
             lastCharId = initialCharId;
-            setTimeout(() => tryRestore(initialCharId), 3000);
         }
 
         eventSource.on(event_types.CHAT_CHANGED, () => {
             const old = document.getElementById('cpt_char_panel');
             if (old) old.remove();
             const newCharId = getCurrentCharId();
+            // Only restore when actually switching to a DIFFERENT character
+            const shouldRestore = (lastCharId !== null && newCharId !== null && newCharId !== lastCharId);
             if (newCharId !== null) lastCharId = newCharId;
             setTimeout(() => {
                 injectCharPanel();
                 debouncedReinject();
-                // Always try to restore — even if same char (e.g. page reload, chat switch)
-                if (newCharId) tryRestore(newCharId);
+                if (shouldRestore) tryRestore(newCharId);
             }, 2000);
         });
 
