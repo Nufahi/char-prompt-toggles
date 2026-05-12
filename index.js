@@ -16,27 +16,17 @@ let cachedPromptManager = null;
 let openaiModulePromise = null;
 let actionInProgress = false;
 
-// Persisted settings (small separate key to avoid bloating the main storage reads)
+/* -- Settings persistence -- */
+
 function loadSettings() {
     try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}; }
     catch(e) { return {}; }
 }
-function saveSettings(s) {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
-}
-function getSetting(key, def) {
-    const s = loadSettings();
-    return key in s ? s[key] : def;
-}
-function setSetting(key, val) {
-    const s = loadSettings();
-    s[key] = val;
-    saveSettings(s);
-}
+function saveSettings(s) { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); }
+function getSetting(key, def) { const s = loadSettings(); return key in s ? s[key] : def; }
+function setSetting(key, val) { const s = loadSettings(); s[key] = val; saveSettings(s); }
 
-/* ============================================================
-   CORE HELPERS
-   ============================================================ */
+/* -- Helpers -- */
 
 function getCurrentCharId() {
     const ctx = SillyTavern.getContext();
@@ -59,9 +49,7 @@ function loadStorage() {
     catch(e) { return {}; }
 }
 
-function saveStorage(data) {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-}
+function saveStorage(data) { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); }
 
 function readTogglesFromDOM() {
     const toggles = {};
@@ -106,9 +94,7 @@ function getTranslator() {
 }
 
 function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, (c) => ({
-        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-    })[c]);
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 }
 
 function debounce(fn, ms) {
@@ -120,26 +106,16 @@ function debounce(fn, ms) {
     };
 }
 
-function isReservedKey(key) {
-    return typeof key === 'string' && key.startsWith('_');
-}
+function isReservedKey(key) { return typeof key === 'string' && key.startsWith('_'); }
 
-/* ============================================================
-   PER-CHARACTER SAVE / RESTORE
-   ============================================================ */
+/* -- Per-character save / restore -- */
 
 function doSave() {
     const charId = getCurrentCharId();
-    if (!charId || isReservedKey(charId)) {
-        updateStatus('No active character');
-        return;
-    }
+    if (!charId || isReservedKey(charId)) { updateStatus('No active character'); return; }
     const toggles = readTogglesFromDOM();
     const count = Object.keys(toggles).length;
-    if (count === 0) {
-        updateStatus('Toggles not found — open Prompt Manager');
-        return;
-    }
+    if (count === 0) { updateStatus('Toggles not found — open Prompt Manager'); return; }
     const data = loadStorage();
     data[charId] = toggles;
     saveStorage(data);
@@ -152,27 +128,18 @@ function tryRestore(charId, attempt, maxAttempts) {
     if (!charId || isReservedKey(charId)) return;
     const toggles = readTogglesFromDOM();
     if (Object.keys(toggles).length === 0) {
-        if (attempt < maxAttempts) {
-            setTimeout(function() { tryRestore(charId, attempt + 1, maxAttempts); }, 1000);
-        }
+        if (attempt < maxAttempts) setTimeout(() => tryRestore(charId, attempt + 1, maxAttempts), 1000);
         return;
     }
     const data = loadStorage();
     if (!data[charId]) return;
     const applied = applyTogglesToDOM(data[charId]);
-    if (applied > 0) {
-        updateStatus(getCharName() + ': auto-restored ' + applied + ' toggles');
-    }
+    if (applied > 0) updateStatus(getCharName() + ': auto-restored ' + applied + ' toggles');
 }
 
-/* ============================================================
-   GLOBAL PROFILES (stored under _profiles in localStorage)
-   ============================================================ */
+/* -- Global profiles -- */
 
-function getProfiles() {
-    const data = loadStorage();
-    return data._profiles || {};
-}
+function getProfiles() { return loadStorage()._profiles || {}; }
 
 function saveProfiles(profiles) {
     const data = loadStorage();
@@ -180,9 +147,7 @@ function saveProfiles(profiles) {
     saveStorage(data);
 }
 
-function getProfileNames() {
-    return Object.keys(getProfiles());
-}
+function getProfileNames() { return Object.keys(getProfiles()); }
 
 function setSelectedProfile(name) {
     selectedProfile = name;
@@ -192,10 +157,7 @@ function setSelectedProfile(name) {
 function profileSave(name) {
     if (!name) return;
     const toggles = readTogglesFromDOM();
-    if (Object.keys(toggles).length === 0) {
-        toastr.warning('Open Prompt Manager first', MODULE_NAME);
-        return;
-    }
+    if (Object.keys(toggles).length === 0) { toastr.warning('Open Prompt Manager first', MODULE_NAME); return; }
     const profiles = getProfiles();
     profiles[name] = toggles;
     saveProfiles(profiles);
@@ -243,49 +205,33 @@ function refreshProfileUI() {
             opt.textContent = n;
             sel.appendChild(opt);
         });
-        // Restore previously selected profile
-        if (selectedProfile && names.includes(selectedProfile)) {
-            sel.value = selectedProfile;
-        } else {
-            setSelectedProfile(sel.value);
-        }
+        if (selectedProfile && names.includes(selectedProfile)) sel.value = selectedProfile;
+        else setSelectedProfile(sel.value);
     }
-    // Track changes from the dropdown itself
-    sel.onchange = () => { setSelectedProfile(sel.value); };
+    sel.onchange = () => setSelectedProfile(sel.value);
 }
 
-/* ============================================================
-   CONTEXT UNLOCK LOCK
-   ============================================================ */
+/* -- Context unlock lock -- */
 
 const CTX_LOCK_KEY = 'lockContextUnlock';
 
-function isContextLockEnabled() {
-    return !!getSetting(CTX_LOCK_KEY, false);
-}
+function isContextLockEnabled() { return !!getSetting(CTX_LOCK_KEY, false); }
 
-function setContextLock(enabled) {
-    setSetting(CTX_LOCK_KEY, enabled);
-    applyContextLock();
-}
+function setContextLock(enabled) { setSetting(CTX_LOCK_KEY, enabled); applyContextLock(); }
 
 function injectContextLockToggle() {
     const cb = document.getElementById('oai_max_context_unlocked');
-    if (!cb) return;
-    // Already injected?
-    if (document.getElementById('cpt_lock_context')) return;
-
+    if (!cb || document.getElementById('cpt_lock_context')) return;
     const label = cb.closest('label.checkbox_label');
     if (!label) return;
 
     const t = getTranslator();
     const locked = isContextLockEnabled();
-
     const btn = document.createElement('span');
     btn.id = 'cpt_lock_context';
     btn.className = 'cpt-ctx-lock fa-solid ' + (locked ? 'fa-lock' : 'fa-lock-open') + ' fa-xs';
     btn.title = t('Lock context unlock');
-    btn.style.cssText = 'cursor:pointer;margin-left:6px;opacity:0.7;';
+    btn.style.cssText = 'cursor:pointer;margin-left:6px;opacity:' + (locked ? '1' : '0.7') + ';';
     btn.addEventListener('click', (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
@@ -295,8 +241,6 @@ function injectContextLockToggle() {
         btn.classList.toggle('fa-lock-open', !newState);
         btn.style.opacity = newState ? '1' : '0.7';
     });
-    if (locked) btn.style.opacity = '1';
-
     label.appendChild(btn);
     applyContextLock();
 }
@@ -304,12 +248,8 @@ function injectContextLockToggle() {
 function applyContextLock() {
     const cb = document.getElementById('oai_max_context_unlocked');
     if (!cb) return;
-    const locked = isContextLockEnabled();
-    if (locked) {
-        if (cb.checked) {
-            cb.checked = false;
-            cb.dispatchEvent(new Event('change', { bubbles: true }));
-        }
+    if (isContextLockEnabled()) {
+        if (cb.checked) { cb.checked = false; cb.dispatchEvent(new Event('change', { bubbles: true })); }
         cb.disabled = true;
         cb.style.opacity = '0.4';
         cb.style.pointerEvents = 'none';
@@ -332,9 +272,7 @@ function setupContextLockGuard() {
     });
 }
 
-/* ============================================================
-   CHARACTER PANEL (per-char save only)
-   ============================================================ */
+/* -- Character panel -- */
 
 function injectCharPanel() {
     if (document.getElementById('cpt_char_panel')) return;
@@ -368,32 +306,25 @@ function injectCharPanel() {
         const target = document.getElementById('form_create');
         if (target) target.appendChild(panel);
     }
-
     document.getElementById('cpt_char_save').addEventListener('click', doSave);
 }
 
-/* ============================================================
-   PROMPT MANAGER TOOLBAR: search + profiles
-   ============================================================ */
+/* -- PM toolbar: search + profiles -- */
 
 function injectPMToolbar() {
     const list = document.getElementById(PM_LIST_ID);
-    if (!list) return false;
-    if (document.getElementById(TOOLBAR_ID)) return true;
+    if (!list || document.getElementById(TOOLBAR_ID)) return;
 
     const t = getTranslator();
-
     const toolbar = document.createElement('div');
     toolbar.id = TOOLBAR_ID;
     toolbar.className = 'cpt-pm-toolbar';
     toolbar.innerHTML =
-        // Search row
         '<div class="cpt-pm-search-wrap">' +
             '<span class="fa-solid fa-magnifying-glass cpt-pm-search-icon"></span>' +
             '<input type="text" id="' + SEARCH_INPUT_ID + '" class="text_pole cpt-pm-search-input" placeholder="" autocomplete="off" />' +
             '<span id="' + SEARCH_CLEAR_ID + '" class="fa-solid fa-xmark cpt-pm-search-clear" title=""></span>' +
         '</div>' +
-        // Profiles row
         '<div class="cpt-profiles-row">' +
             '<select id="cpt_profile_select" class="text_pole cpt-profile-select"></select>' +
             '<span id="cpt_profile_apply" class="cpt-profile-btn fa-solid fa-check fa-xs" title="' + escapeHtml(t('Apply profile')) + '"></span>' +
@@ -404,7 +335,6 @@ function injectPMToolbar() {
 
     list.parentElement.insertBefore(toolbar, list);
 
-    // Search
     const input = toolbar.querySelector('#' + SEARCH_INPUT_ID);
     const clear = toolbar.querySelector('#' + SEARCH_CLEAR_ID);
     input.placeholder = t('Search prompts by name...');
@@ -413,29 +343,21 @@ function injectPMToolbar() {
     input.addEventListener('input', () => { searchQuery = input.value; applySearchFilter(); });
     clear.addEventListener('click', () => { input.value = ''; searchQuery = ''; applySearchFilter(); input.focus(); });
 
-    // Profile: Apply — read from selectedProfile (persisted across re-renders)
     toolbar.querySelector('#cpt_profile_apply').addEventListener('click', () => {
         const name = selectedProfile || document.getElementById('cpt_profile_select')?.value;
         if (name) profileApply(name);
     });
-
-    // Profile: Overwrite
     toolbar.querySelector('#cpt_profile_save').addEventListener('click', () => {
         const name = selectedProfile || document.getElementById('cpt_profile_select')?.value;
         if (name) profileSave(name);
     });
-
-    // Profile: New
     toolbar.querySelector('#cpt_profile_new').addEventListener('click', () => {
         const name = window.prompt(t('New profile name'));
         if (!name || !name.trim()) return;
-        const trimmed = name.trim();
-        profileSave(trimmed);
-        setSelectedProfile(trimmed);
+        profileSave(name.trim());
+        setSelectedProfile(name.trim());
         refreshProfileUI();
     });
-
-    // Profile: Delete
     toolbar.querySelector('#cpt_profile_delete').addEventListener('click', () => {
         const name = selectedProfile || document.getElementById('cpt_profile_select')?.value;
         if (!name) return;
@@ -444,7 +366,6 @@ function injectPMToolbar() {
     });
 
     refreshProfileUI();
-    return true;
 }
 
 function applySearchFilter() {
@@ -460,43 +381,29 @@ function applySearchFilter() {
     });
 }
 
-/* ============================================================
-   PROMPT MANAGER: duplicate, delete, row actions
-   ============================================================ */
+/* -- PM: duplicate, delete, row actions -- */
 
 async function resolvePromptManager() {
     if (cachedPromptManager) return cachedPromptManager;
     if (!openaiModulePromise) {
-        openaiModulePromise = import('/scripts/openai.js').catch((e) => {
-            console.warn('[' + MODULE_NAME + '] failed to import /scripts/openai.js, trying relative path', e);
-            return import('../../../openai.js');
-        });
+        openaiModulePromise = import('/scripts/openai.js').catch(() => import('../../../openai.js'));
     }
     try {
         const mod = await openaiModulePromise;
-        if (mod && mod.promptManager) {
-            cachedPromptManager = mod.promptManager;
-            return cachedPromptManager;
-        }
-    } catch (e) {
-        console.error('[' + MODULE_NAME + '] cannot import openai.js:', e);
-    }
+        if (mod?.promptManager) { cachedPromptManager = mod.promptManager; return cachedPromptManager; }
+    } catch (e) { console.error('[' + MODULE_NAME + '] cannot resolve promptManager:', e); }
     return null;
 }
 
 function getPromptsArray() {
     if (cachedPromptManager?.serviceSettings?.prompts) return cachedPromptManager.serviceSettings.prompts;
-    try {
-        const ctx = SillyTavern.getContext();
-        if (ctx?.chatCompletionSettings?.prompts) return ctx.chatCompletionSettings.prompts;
-    } catch (e) {}
+    try { const ctx = SillyTavern.getContext(); if (ctx?.chatCompletionSettings?.prompts) return ctx.chatCompletionSettings.prompts; } catch (e) {}
     return null;
 }
 
-function getPromptById(identifier) {
+function getPromptById(id) {
     const arr = getPromptsArray();
-    if (!arr) return null;
-    return arr.find(p => p && p.identifier === identifier) || null;
+    return arr ? arr.find(p => p?.identifier === id) || null : null;
 }
 
 function getPromptNameFromDOM(li) {
@@ -504,7 +411,7 @@ function getPromptNameFromDOM(li) {
     const nameEl = li.querySelector('.completion_prompt_manager_prompt_name');
     if (!nameEl) return (li.textContent || '').trim();
     const inspect = nameEl.querySelector('.prompt-manager-inspect-action');
-    if (inspect && inspect.textContent) return inspect.textContent.trim();
+    if (inspect?.textContent) return inspect.textContent.trim();
     const attr = nameEl.getAttribute('data-pm-name');
     if (attr) return attr.trim();
     const clone = nameEl.cloneNode(true);
@@ -513,12 +420,8 @@ function getPromptNameFromDOM(li) {
 }
 
 function getUuid() {
-    try {
-        const ctx = SillyTavern.getContext();
-        if (typeof ctx?.uuidv4 === 'function') return ctx.uuidv4();
-    } catch (e) {}
-    if (window.crypto?.randomUUID) return window.crypto.randomUUID();
-    return 'cpt-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10);
+    try { const ctx = SillyTavern.getContext(); if (typeof ctx?.uuidv4 === 'function') return ctx.uuidv4(); } catch (e) {}
+    return window.crypto?.randomUUID?.() || ('cpt-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10));
 }
 
 async function confirmDialog(title, message) {
@@ -536,7 +439,7 @@ async function duplicatePrompt(identifier) {
     try {
         const pm = await resolvePromptManager();
         const src = getPromptById(identifier);
-        if (!pm || !src) { console.error('[' + MODULE_NAME + '] duplicate: not found'); actionInProgress = false; return; }
+        if (!pm || !src) { actionInProgress = false; return; }
 
         const newId = getUuid();
         const copy = JSON.parse(JSON.stringify(src));
@@ -550,13 +453,12 @@ async function duplicatePrompt(identifier) {
         if (pm.activeCharacter && typeof pm.getPromptOrderForCharacter === 'function') {
             const order = pm.getPromptOrderForCharacter(pm.activeCharacter);
             if (Array.isArray(order)) {
-                const srcIdx = order.findIndex(e => e && e.identifier === identifier);
-                const srcEntry = srcIdx !== -1 ? order[srcIdx] : null;
-                const newEntry = { identifier: newId, enabled: srcEntry ? !!srcEntry.enabled : false };
+                const srcIdx = order.findIndex(e => e?.identifier === identifier);
+                const newEntry = { identifier: newId, enabled: srcIdx !== -1 ? !!order[srcIdx].enabled : false };
                 if (srcIdx !== -1) order.splice(srcIdx + 1, 0, newEntry);
                 else order.push(newEntry);
-            } else if (typeof pm.appendPrompt === 'function') pm.appendPrompt(copy, pm.activeCharacter);
-        } else if (typeof pm.appendPrompt === 'function' && pm.activeCharacter) pm.appendPrompt(copy, pm.activeCharacter);
+            }
+        }
 
         if (typeof pm.saveServiceSettings === 'function') await pm.saveServiceSettings();
         if (typeof pm.render === 'function') pm.render();
@@ -570,12 +472,12 @@ async function deletePromptById(identifier) {
     try {
         const pm = await resolvePromptManager();
         const src = getPromptById(identifier);
-        if (!pm || !src) { console.error('[' + MODULE_NAME + '] delete: not found'); actionInProgress = false; return; }
+        if (!pm || !src) { actionInProgress = false; return; }
         if (src.system_prompt) { actionInProgress = false; return; }
         const t = getTranslator();
         if (!(await confirmDialog(t('Delete prompt'), t('Delete prompt') + ' "' + escapeHtml(src.name || identifier) + '"?'))) return;
 
-        if (typeof pm.detachPrompt === 'function' && pm.activeCharacter) { try { pm.detachPrompt(src, pm.activeCharacter); } catch (e) {} }
+        if (typeof pm.detachPrompt === 'function' && pm.activeCharacter) try { pm.detachPrompt(src, pm.activeCharacter); } catch (e) {}
         if (Array.isArray(pm.serviceSettings?.prompts)) {
             const idx = pm.serviceSettings.prompts.findIndex(p => p.identifier === identifier);
             if (idx !== -1) pm.serviceSettings.prompts.splice(idx, 1);
@@ -621,6 +523,8 @@ function injectRowActions() {
     });
 }
 
+/* -- PM observer (disconnect/work/reconnect pattern) -- */
+
 function injectPMEnhancements() {
     const list = document.getElementById(PM_LIST_ID);
     if (!list) return;
@@ -629,62 +533,30 @@ function injectPMEnhancements() {
     applySearchFilter();
 }
 
-/**
- * Lightweight check + inject. Called after ST renders the prompt list.
- * No MutationObserver on the PM container — instead we hook into pm.render
- * and ST events that trigger re-renders.
- */
-const debouncedReinject = debounce(() => {
+function reinjectPM() {
+    if (pmObserver) pmObserver.disconnect();
     injectPMEnhancements();
-}, 400);
-
-/**
- * Monkey-patch pm.render so we reinject after each ST re-render.
- * This completely replaces MutationObserver on the PM container.
- */
-let renderPatched = false;
-function patchPromptManagerRender(pm) {
-    if (!pm || renderPatched) return;
-    const origRender = pm.render.bind(pm);
-    pm.render = function() {
-        const result = origRender.apply(this, arguments);
-        // pm.render is async internally (uses waitUntilCondition + renderPromptManagerListItems)
-        // Schedule our reinject after ST finishes rebuilding the DOM
-        setTimeout(debouncedReinject, 600);
-        return result;
-    };
-    renderPatched = true;
-    console.log('[' + MODULE_NAME + '] pm.render patched');
+    startPMObserver();
 }
 
-/**
- * Fallback: a single one-shot MutationObserver that waits for the PM container
- * to appear in the DOM (it may not exist at extension load time). Once found,
- * it disconnects and does the initial inject + patches pm.render.
- */
+const debouncedReinject = debounce(reinjectPM, 500);
+
+function startPMObserver() {
+    const container = document.getElementById(PM_CONTAINER_ID);
+    if (!container) return;
+    if (!pmObserver) pmObserver = new MutationObserver(debouncedReinject);
+    pmObserver.observe(container, { childList: true, subtree: true });
+}
+
 function waitForPMContainer() {
-    if (document.getElementById(PM_LIST_ID)) {
-        injectPMEnhancements();
-        return;
-    }
-    if (pmObserver) return;
-    pmObserver = new MutationObserver(() => {
-        if (document.getElementById(PM_LIST_ID)) {
-            pmObserver.disconnect();
-            pmObserver = null;
-            injectPMEnhancements();
-        }
+    if (document.getElementById(PM_CONTAINER_ID)) { reinjectPM(); return; }
+    const obs = new MutationObserver(() => {
+        if (document.getElementById(PM_CONTAINER_ID)) { obs.disconnect(); reinjectPM(); }
     });
-    pmObserver.observe(document.body, { childList: true, subtree: true });
+    obs.observe(document.body, { childList: true, subtree: true });
 }
 
-// No more document-level capture handler — click handlers are attached
-// directly to each button in injectRowActions(). This eliminates any
-// interference with ST's toggle/edit/detach handlers on mobile.
-
-/* ============================================================
-   STYLES
-   ============================================================ */
+/* -- Styles -- */
 
 function injectStyles() {
     if (document.getElementById('cpt-styles')) return;
@@ -699,40 +571,18 @@ function injectStyles() {
             position: relative; flex: 1 1 150px; min-width: 0;
             display: flex; align-items: center;
         }
-        .cpt-pm-search-icon {
-            position: absolute; left: 8px; opacity: 0.6;
-            pointer-events: none; font-size: 0.9em;
-        }
-        .cpt-pm-search-input {
-            width: 100%;
-            padding-left: 26px !important; padding-right: 26px !important;
-            box-sizing: border-box;
-        }
-        .cpt-pm-search-clear {
-            position: absolute; right: 8px; opacity: 0.6;
-            cursor: pointer; font-size: 0.9em; padding: 2px;
-        }
+        .cpt-pm-search-icon { position: absolute; left: 8px; opacity: 0.6; pointer-events: none; font-size: 0.9em; }
+        .cpt-pm-search-input { width: 100%; padding-left: 26px !important; padding-right: 26px !important; box-sizing: border-box; }
+        .cpt-pm-search-clear { position: absolute; right: 8px; opacity: 0.6; cursor: pointer; font-size: 0.9em; padding: 2px; }
         .cpt-pm-search-clear:hover { opacity: 1; }
-
-        .cpt-profiles-row {
-            display: flex; gap: 4px; align-items: center;
-            flex: 1 1 150px; min-width: 0;
-        }
-        .cpt-profile-select {
-            flex: 1 1 auto; min-width: 0;
-            font-size: 12px; padding: 3px 6px;
-        }
-        .cpt-profile-btn {
-            cursor: pointer; opacity: 0.65; padding: 2px 4px;
-        }
+        .cpt-profiles-row { display: flex; gap: 4px; align-items: center; flex: 1 1 150px; min-width: 0; }
+        .cpt-profile-select { flex: 1 1 auto; min-width: 0; font-size: 12px; padding: 3px 6px; }
+        .cpt-profile-btn { cursor: pointer; opacity: 0.65; padding: 2px 4px; }
         .cpt-profile-btn:hover { opacity: 1; }
-
         .cpt-row-actions { display: inline-flex; gap: 6px; align-items: center; margin-right: 4px; vertical-align: middle; }
         .cpt-row-action { cursor: pointer; opacity: 0.65; }
         .cpt-row-action:hover { opacity: 1; }
-
         .cpt-ctx-lock:hover { opacity: 1 !important; }
-
         @media (max-width: 600px) {
             #${TOOLBAR_ID}.cpt-pm-toolbar { gap: 4px; }
             .cpt-pm-search-wrap { flex: 1 1 100%; }
@@ -745,79 +595,45 @@ function injectStyles() {
     document.head.appendChild(style);
 }
 
-/* ============================================================
-   INIT
-   ============================================================ */
-
-const debouncedInjectCharPanel = debounce(() => { injectCharPanel(); }, 500);
-const debouncedContextLock = debounce(() => {
-    injectContextLockToggle();
-    setupContextLockGuard();
-}, 1000);
+/* -- Init -- */
 
 jQuery(async () => {
     console.log('[' + MODULE_NAME + '] Loading...');
     try {
         injectStyles();
-
-        // Restore persisted selectedProfile
         selectedProfile = getSetting('selectedProfile', '');
+        resolvePromptManager();
 
-        const charPanelObserver = new MutationObserver(() => {
-            debouncedInjectCharPanel();
-            debouncedContextLock();
-        });
-        charPanelObserver.observe(document.body, { childList: true, subtree: true });
         injectCharPanel();
         injectContextLockToggle();
         setupContextLockGuard();
-
-        // Patch pm.render once resolved (main mechanism for reinject — no MutationObserver)
-        resolvePromptManager().then(pm => {
-            if (pm) {
-                patchPromptManagerRender(pm);
-                console.log('[' + MODULE_NAME + '] promptManager resolved');
-            } else {
-                console.warn('[' + MODULE_NAME + '] promptManager not resolved');
-            }
-        });
-
-        // Fallback: wait for PM container if it doesn't exist yet
         waitForPMContainer();
 
         const { eventSource, event_types } = SillyTavern.getContext();
-
-        // ST events that cause PM re-renders — reinject after each
-        const reinjectEvents = [
-            event_types.OAI_PRESET_CHANGED_AFTER,
-            event_types.CHAT_LOADED,
-            event_types.CHATCOMPLETION_SOURCE_CHANGED,
-            event_types.CHATCOMPLETION_MODEL_CHANGED,
-        ];
-        reinjectEvents.forEach(evt => {
-            if (evt) eventSource.on(evt, () => setTimeout(debouncedReinject, 800));
-        });
-
-        // Remember who's open now — but do NOT auto-restore on page load.
-        // Restore only triggers when switching FROM one char TO another.
         const initialCharId = getCurrentCharId();
-        if (initialCharId) {
-            lastCharId = initialCharId;
-        }
+        if (initialCharId) lastCharId = initialCharId;
 
         eventSource.on(event_types.CHAT_CHANGED, () => {
             const old = document.getElementById('cpt_char_panel');
             if (old) old.remove();
             const newCharId = getCurrentCharId();
-            // Only restore when actually switching to a DIFFERENT character
             const shouldRestore = (lastCharId !== null && newCharId !== null && newCharId !== lastCharId);
             if (newCharId !== null) lastCharId = newCharId;
             setTimeout(() => {
                 injectCharPanel();
+                injectContextLockToggle();
+                setupContextLockGuard();
                 debouncedReinject();
                 if (shouldRestore) tryRestore(newCharId);
             }, 2000);
         });
+
+        if (event_types.OAI_PRESET_CHANGED_AFTER) {
+            eventSource.on(event_types.OAI_PRESET_CHANGED_AFTER, () => {
+                setTimeout(debouncedReinject, 800);
+                setTimeout(() => { injectContextLockToggle(); setupContextLockGuard(); }, 1000);
+            });
+        }
 
         console.log('[' + MODULE_NAME + '] Loaded successfully');
     } catch (error) {
