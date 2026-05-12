@@ -492,6 +492,13 @@ function injectRowActions() {
     const list = document.getElementById(PM_LIST_ID);
     if (!list) return;
     const t = getTranslator();
+
+    // Token count spans overlap toggle buttons on mobile — disable their pointer events
+    // (same fix as 预设条目更多按钮)
+    list.querySelectorAll('.prompt_manager_prompt_tokens').forEach(el => {
+        el.style.pointerEvents = 'none';
+    });
+
     list.querySelectorAll('li.completion_prompt_manager_prompt[data-pm-identifier]').forEach(li => {
         if (li.querySelector(':scope > .completion_prompt_manager_prompt_name .fa-thumb-tack')) return;
         if (li.querySelector(':scope > .completion_prompt_manager_prompt_name .fa-star')) return;
