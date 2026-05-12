@@ -599,16 +599,22 @@ function injectRowActions() {
         if (!isUser && !isInjection && !isSystem) return;
         const controls = li.querySelector('.prompt_manager_prompt_controls');
         if (!controls || controls.querySelector('.cpt-row-actions')) return;
+        const id = li.dataset.pmIdentifier;
+
         const wrap = document.createElement('span');
         wrap.className = 'cpt-row-actions';
+
         const dup = document.createElement('span');
         dup.className = 'cpt-row-action cpt-row-duplicate fa-solid fa-copy fa-xs';
         dup.title = t('Duplicate');
+        dup.addEventListener('click', (ev) => { ev.stopPropagation(); duplicatePrompt(id); });
         wrap.appendChild(dup);
+
         if (!isSystem) {
             const del = document.createElement('span');
             del.className = 'cpt-row-action cpt-row-delete fa-solid fa-trash fa-xs caution';
             del.title = t('Delete');
+            del.addEventListener('click', (ev) => { ev.stopPropagation(); deletePromptById(id); });
             wrap.appendChild(del);
         }
         controls.prepend(wrap);
@@ -672,16 +678,9 @@ function waitForPMContainer() {
     pmObserver.observe(document.body, { childList: true, subtree: true });
 }
 
-function setupDelegatedHandlers() {
-    document.addEventListener('click', (ev) => {
-        const target = ev.target;
-        if (!(target instanceof Element)) return;
-        const dup = target.closest('.cpt-row-duplicate');
-        if (dup) { ev.preventDefault(); ev.stopPropagation(); const li = dup.closest('li[data-pm-identifier]'); if (li) duplicatePrompt(li.dataset.pmIdentifier); return; }
-        const del = target.closest('.cpt-row-delete');
-        if (del) { ev.preventDefault(); ev.stopPropagation(); const li = del.closest('li[data-pm-identifier]'); if (li) deletePromptById(li.dataset.pmIdentifier); return; }
-    }, true);
-}
+// No more document-level capture handler — click handlers are attached
+// directly to each button in injectRowActions(). This eliminates any
+// interference with ST's toggle/edit/detach handlers on mobile.
 
 /* ============================================================
    STYLES
@@ -772,8 +771,6 @@ jQuery(async () => {
         injectCharPanel();
         injectContextLockToggle();
         setupContextLockGuard();
-
-        setupDelegatedHandlers();
 
         // Patch pm.render once resolved (main mechanism for reinject — no MutationObserver)
         resolvePromptManager().then(pm => {
