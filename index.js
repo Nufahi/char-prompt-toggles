@@ -15,6 +15,7 @@ let pmObserver = null;
 let cachedPromptManager = null;
 let openaiModulePromise = null;
 let actionInProgress = false;
+let restoreGeneration = 0;
 
 /* -- Settings persistence -- */
 
@@ -122,13 +123,18 @@ function doSave() {
     updateStatus(getCharName() + ': saved ' + count + ' toggles');
 }
 
-function tryRestore(charId, attempt, maxAttempts) {
+function tryRestore(charId, attempt, maxAttempts, generation) {
     attempt = attempt || 1;
     maxAttempts = maxAttempts || 8;
+    if (generation === undefined) generation = restoreGeneration;
+    // Abort if a newer character switch happened in the meantime.
+    if (generation !== restoreGeneration) return;
     if (!charId || isReservedKey(charId)) return;
+    // Abort if the active character no longer matches the one we're restoring for.
+    if (getCurrentCharId() !== charId) return;
     const toggles = readTogglesFromDOM();
     if (Object.keys(toggles).length === 0) {
-        if (attempt < maxAttempts) setTimeout(() => tryRestore(charId, attempt + 1, maxAttempts), 1000);
+        if (attempt < maxAttempts) setTimeout(() => tryRestore(charId, attempt + 1, maxAttempts, generation), 1000);
         return;
     }
     const data = loadStorage();
@@ -265,9 +271,11 @@ function setupContextLockGuard() {
     if (!cb || cb._cptGuarded) return;
     cb._cptGuarded = true;
     cb.addEventListener('change', () => {
+        // If locked and something tries to check it, revert silently.
+        // Do NOT re-dispatch 'change' here: it re-enters this handler and forces
+        // ST to re-run its own change handler redundantly.
         if (isContextLockEnabled() && cb.checked) {
             cb.checked = false;
-            cb.dispatchEvent(new Event('change', { bubbles: true }));
         }
     });
 }
@@ -298,15 +306,19 @@ function injectCharPanel() {
             '</div>' +
         '</div>';
 
+    let inserted = false;
     const creatorsDiv = document.getElementById('creators_notes_div');
     if (creatorsDiv) {
         const drawer = creatorsDiv.closest('.inline-drawer');
-        if (drawer) drawer.before(panel);
-    } else {
-        const target = document.getElementById('form_create');
-        if (target) target.appendChild(panel);
+        if (drawer) { drawer.before(panel); inserted = true; }
     }
-    document.getElementById('cpt_char_save').addEventListener('click', doSave);
+    if (!inserted) {
+        const target = document.getElementById('form_create');
+        if (target) { target.appendChild(panel); inserted = true; }
+    }
+    if (!inserted) return; // No host element yet; will retry on next event.
+    const saveBtn = panel.querySelector('#cpt_char_save');
+    if (saveBtn) saveBtn.addEventListener('click', doSave);
 }
 
 /* -- PM toolbar: search + profiles -- */
@@ -446,6 +458,7 @@ async function duplicatePrompt(identifier) {
         copy.identifier = newId;
         copy.system_prompt = false;
         copy.marker = false;
+        if (typeof copy.name === 'string') copy.name = copy.name + ' (copy)';
 
         if (typeof pm.addPrompt === 'function') pm.addPrompt(copy, newId);
         else if (Array.isArray(pm.serviceSettings?.prompts)) pm.serviceSettings.prompts.push(copy);
@@ -557,10 +570,19 @@ function startPMObserver() {
 
 function waitForPMContainer() {
     if (document.getElementById(PM_CONTAINER_ID)) { reinjectPM(); return; }
+    let stopped = false;
     const obs = new MutationObserver(() => {
-        if (document.getElementById(PM_CONTAINER_ID)) { obs.disconnect(); reinjectPM(); }
+        if (stopped) return;
+        if (document.getElementById(PM_CONTAINER_ID)) {
+            stopped = true;
+            obs.disconnect();
+            reinjectPM();
+        }
     });
     obs.observe(document.body, { childList: true, subtree: true });
+    // Safety cap: don't observe the whole DOM forever if the PM never appears
+    // (e.g. non Chat-Completion backends). Stop after 60s.
+    setTimeout(() => { if (!stopped) { stopped = true; obs.disconnect(); } }, 60000);
 }
 
 /* -- Styles -- */
@@ -626,12 +648,14 @@ jQuery(async () => {
             const newCharId = getCurrentCharId();
             const shouldRestore = (lastCharId !== null && newCharId !== null && newCharId !== lastCharId);
             if (newCharId !== null) lastCharId = newCharId;
+            // Invalidate any in-flight restore retry chain from a previous switch.
+            const generation = ++restoreGeneration;
             setTimeout(() => {
                 injectCharPanel();
                 injectContextLockToggle();
                 setupContextLockGuard();
                 debouncedReinject();
-                if (shouldRestore) tryRestore(newCharId);
+                if (shouldRestore) tryRestore(newCharId, 1, 8, generation);
             }, 2000);
         });
 
