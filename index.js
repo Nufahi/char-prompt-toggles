@@ -562,27 +562,38 @@ function reinjectPM() {
 const debouncedReinject = debounce(reinjectPM, 500);
 
 function startPMObserver() {
+    // Observe the PM container's DIRECT children only (no subtree). pm.render()
+    // replaces the whole #completion_prompt_manager_list node, which is a direct
+    // child of the stable container, so childList here catches re-renders.
+    // Dropping subtree:true stops the observer from re-firing on every
+    // toggle/drag/attribute change deep inside rows, which previously caused a
+    // self-feeding reinject loop and lag on large presets. Our own toolbar
+    // insertion can't loop because reinjectPM() disconnects before injecting.
     const container = document.getElementById(PM_CONTAINER_ID);
     if (!container) return;
     if (!pmObserver) pmObserver = new MutationObserver(debouncedReinject);
-    pmObserver.observe(container, { childList: true, subtree: true });
+    pmObserver.observe(container, { childList: true });
 }
 
 function waitForPMContainer() {
     if (document.getElementById(PM_CONTAINER_ID)) { reinjectPM(); return; }
-    let stopped = false;
-    const obs = new MutationObserver(() => {
-        if (stopped) return;
+    // Lightweight polling instead of a document.body subtree observer. The body
+    // observer fired on every DOM mutation while ST builds its whole UI on load,
+    // which was the main source of startup lag. The PM container only needs to be
+    // detected once, so a cheap interval is sufficient and far less costly.
+    let elapsed = 0;
+    const intervalMs = 500;
+    const maxMs = 60000;
+    const timer = setInterval(() => {
+        elapsed += intervalMs;
         if (document.getElementById(PM_CONTAINER_ID)) {
-            stopped = true;
-            obs.disconnect();
+            clearInterval(timer);
             reinjectPM();
+        } else if (elapsed >= maxMs) {
+            // Stop polling if the PM never appears (e.g. non Chat-Completion backends).
+            clearInterval(timer);
         }
-    });
-    obs.observe(document.body, { childList: true, subtree: true });
-    // Safety cap: don't observe the whole DOM forever if the PM never appears
-    // (e.g. non Chat-Completion backends). Stop after 60s.
-    setTimeout(() => { if (!stopped) { stopped = true; obs.disconnect(); } }, 60000);
+    }, intervalMs);
 }
 
 /* -- Styles -- */
@@ -624,6 +635,28 @@ function injectStyles() {
     document.head.appendChild(style);
 }
 
+/* -- Settings panel (Extensions menu) -- */
+
+async function injectSettingsPanel() {
+    const container = document.getElementById('extensions_settings2') || document.getElementById('extensions_settings');
+    if (!container || document.querySelector('.char-prompt-toggles-settings')) return;
+    try {
+        // settings.html lives next to this module; resolve its URL relative to index.js
+        // so it works for both "all users" and "current user" install locations.
+        const url = new URL('settings.html', import.meta.url).href;
+        const resp = await fetch(url);
+        if (!resp.ok) return;
+        let html = await resp.text();
+        const ctx = SillyTavern.getContext();
+        if (ctx?.libs?.DOMPurify) html = ctx.libs.DOMPurify.sanitize(html);
+        const wrap = document.createElement('div');
+        wrap.innerHTML = html;
+        container.appendChild(wrap.firstElementChild || wrap);
+    } catch (e) {
+        console.error('[' + MODULE_NAME + '] settings panel inject failed:', e);
+    }
+}
+
 /* -- Init -- */
 
 jQuery(async () => {
@@ -636,6 +669,7 @@ jQuery(async () => {
         injectCharPanel();
         injectContextLockToggle();
         setupContextLockGuard();
+        injectSettingsPanel();
         waitForPMContainer();
 
         const { eventSource, event_types } = SillyTavern.getContext();
