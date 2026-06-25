@@ -635,28 +635,6 @@ function injectStyles() {
     document.head.appendChild(style);
 }
 
-/* -- Settings panel (Extensions menu) -- */
-
-async function injectSettingsPanel() {
-    const container = document.getElementById('extensions_settings2') || document.getElementById('extensions_settings');
-    if (!container || document.querySelector('.char-prompt-toggles-settings')) return;
-    try {
-        // settings.html lives next to this module; resolve its URL relative to index.js
-        // so it works for both "all users" and "current user" install locations.
-        const url = new URL('settings.html', import.meta.url).href;
-        const resp = await fetch(url);
-        if (!resp.ok) return;
-        let html = await resp.text();
-        const ctx = SillyTavern.getContext();
-        if (ctx?.libs?.DOMPurify) html = ctx.libs.DOMPurify.sanitize(html);
-        const wrap = document.createElement('div');
-        wrap.innerHTML = html;
-        container.appendChild(wrap.firstElementChild || wrap);
-    } catch (e) {
-        console.error('[' + MODULE_NAME + '] settings panel inject failed:', e);
-    }
-}
-
 /* -- Init -- */
 
 jQuery(async () => {
@@ -669,7 +647,6 @@ jQuery(async () => {
         injectCharPanel();
         injectContextLockToggle();
         setupContextLockGuard();
-        injectSettingsPanel();
         waitForPMContainer();
 
         const { eventSource, event_types } = SillyTavern.getContext();
