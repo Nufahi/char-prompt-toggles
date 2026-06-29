@@ -16,6 +16,8 @@ let cachedPromptManager = null;
 let openaiModulePromise = null;
 let actionInProgress = false;
 let restoreGeneration = 0;
+let pmWaitTimer = null;
+let chatChangedTimer = null;
 
 /* -- Settings persistence -- */
 
@@ -64,20 +66,55 @@ function readTogglesFromDOM() {
     return toggles;
 }
 
-function applyTogglesToDOM(saved) {
-    let applied = 0;
+// Collect the toggle elements whose state must change, without clicking yet.
+function collectTogglesToFlip(saved) {
+    const pending = [];
     document.querySelectorAll('[data-pm-identifier]').forEach(el => {
         const id = el.dataset.pmIdentifier;
         if (!id || !(id in saved)) return;
         const toggle = el.querySelector('.fa-toggle-on, .fa-toggle-off');
         if (!toggle) return;
         const isOn = toggle.classList.contains('fa-toggle-on');
-        if (isOn !== saved[id]) {
-            toggle.click();
-            applied++;
-        }
+        if (isOn !== saved[id]) pending.push(toggle);
     });
-    return applied;
+    return pending;
+}
+
+// Each toggle.click() makes Prompt Manager save settings and re-render the whole
+// list. Doing that synchronously for a big preset freezes the UI (and re-fires
+// our own observer). Instead: pause the observer, click in small rAF batches so
+// the browser can breathe, then resume the observer once at the end.
+let togglesApplyInFlight = false;
+function applyTogglesBatched(saved, onDone) {
+    const pending = collectTogglesToFlip(saved);
+    if (pending.length === 0) { if (onDone) onDone(0); return; }
+    if (togglesApplyInFlight) { if (onDone) onDone(0); return; }
+    togglesApplyInFlight = true;
+
+    if (pmObserver) pmObserver.disconnect();
+
+    const total = pending.length;
+    const CHUNK = 8;
+    let i = 0;
+
+    const finish = () => {
+        togglesApplyInFlight = false;
+        // Resume observing the (re-rendered) PM and re-apply our enhancements once.
+        startPMObserver();
+        injectPMEnhancements();
+        if (onDone) onDone(total);
+    };
+
+    const step = () => {
+        const end = Math.min(i + CHUNK, total);
+        for (; i < end; i++) {
+            const toggle = pending[i];
+            if (toggle && toggle.isConnected) toggle.click();
+        }
+        if (i < total) requestAnimationFrame(step);
+        else finish();
+    };
+    requestAnimationFrame(step);
 }
 
 function updateStatus(text) {
@@ -125,11 +162,13 @@ function doSave() {
 
 function tryRestore(charId, attempt, maxAttempts, generation) {
     attempt = attempt || 1;
-    maxAttempts = maxAttempts || 8;
+    maxAttempts = maxAttempts || 5;
     if (generation === undefined) generation = restoreGeneration;
     // Abort if a newer character switch happened in the meantime.
     if (generation !== restoreGeneration) return;
     if (!charId || isReservedKey(charId)) return;
+    // A batched apply is already running — don't start another on top of it.
+    if (togglesApplyInFlight) return;
     // Abort if the active character no longer matches the one we're restoring for.
     if (getCurrentCharId() !== charId) return;
     const toggles = readTogglesFromDOM();
@@ -139,8 +178,10 @@ function tryRestore(charId, attempt, maxAttempts, generation) {
     }
     const data = loadStorage();
     if (!data[charId]) return;
-    const applied = applyTogglesToDOM(data[charId]);
-    if (applied > 0) updateStatus(getCharName() + ': auto-restored ' + applied + ' toggles');
+    const name = getCharName();
+    applyTogglesBatched(data[charId], (applied) => {
+        if (applied > 0) updateStatus(name + ': auto-restored ' + applied + ' toggles');
+    });
 }
 
 /* -- Global profiles -- */
@@ -177,8 +218,9 @@ function profileApply(name) {
     const profiles = getProfiles();
     if (!profiles[name]) return;
     setSelectedProfile(name);
-    const applied = applyTogglesToDOM(profiles[name]);
-    toastr.info('Profile "' + escapeHtml(name) + '" applied (' + applied + ' changed)', MODULE_NAME);
+    applyTogglesBatched(profiles[name], (applied) => {
+        toastr.info('Profile "' + escapeHtml(name) + '" applied (' + applied + ' changed)', MODULE_NAME);
+    });
 }
 
 function profileDelete(name) {
@@ -349,28 +391,32 @@ function injectPMToolbar() {
 
     const input = toolbar.querySelector('#' + SEARCH_INPUT_ID);
     const clear = toolbar.querySelector('#' + SEARCH_CLEAR_ID);
-    input.placeholder = t('Search prompts by name...');
-    clear.title = t('Clear');
-    if (searchQuery) input.value = searchQuery;
-    input.addEventListener('input', () => { searchQuery = input.value; applySearchFilter(); });
-    clear.addEventListener('click', () => { input.value = ''; searchQuery = ''; applySearchFilter(); input.focus(); });
+    if (input) {
+        input.placeholder = t('Search prompts by name...');
+        if (searchQuery) input.value = searchQuery;
+        input.addEventListener('input', () => { searchQuery = input.value; applySearchFilter(); });
+    }
+    if (clear) {
+        clear.title = t('Clear');
+        clear.addEventListener('click', () => { if (input) input.value = ''; searchQuery = ''; applySearchFilter(); input?.focus(); });
+    }
 
-    toolbar.querySelector('#cpt_profile_apply').addEventListener('click', () => {
+    toolbar.querySelector('#cpt_profile_apply')?.addEventListener('click', () => {
         const name = selectedProfile || document.getElementById('cpt_profile_select')?.value;
         if (name) profileApply(name);
     });
-    toolbar.querySelector('#cpt_profile_save').addEventListener('click', () => {
+    toolbar.querySelector('#cpt_profile_save')?.addEventListener('click', () => {
         const name = selectedProfile || document.getElementById('cpt_profile_select')?.value;
         if (name) profileSave(name);
     });
-    toolbar.querySelector('#cpt_profile_new').addEventListener('click', () => {
+    toolbar.querySelector('#cpt_profile_new')?.addEventListener('click', () => {
         const name = window.prompt(t('New profile name'));
         if (!name || !name.trim()) return;
         profileSave(name.trim());
         setSelectedProfile(name.trim());
         refreshProfileUI();
     });
-    toolbar.querySelector('#cpt_profile_delete').addEventListener('click', () => {
+    toolbar.querySelector('#cpt_profile_delete')?.addEventListener('click', () => {
         const name = selectedProfile || document.getElementById('cpt_profile_select')?.value;
         if (!name) return;
         if (!window.confirm(t('Delete profile') + ' "' + name + '"?')) return;
@@ -576,6 +622,7 @@ function startPMObserver() {
 }
 
 function waitForPMContainer() {
+    if (pmWaitTimer) return; // Poll is already running; don't stack intervals.
     if (document.getElementById(PM_CONTAINER_ID)) { reinjectPM(); return; }
     // Lightweight polling instead of a document.body subtree observer. The body
     // observer fired on every DOM mutation while ST builds its whole UI on load,
@@ -584,14 +631,16 @@ function waitForPMContainer() {
     let elapsed = 0;
     const intervalMs = 500;
     const maxMs = 60000;
-    const timer = setInterval(() => {
+    pmWaitTimer = setInterval(() => {
         elapsed += intervalMs;
         if (document.getElementById(PM_CONTAINER_ID)) {
-            clearInterval(timer);
+            clearInterval(pmWaitTimer);
+            pmWaitTimer = null;
             reinjectPM();
         } else if (elapsed >= maxMs) {
             // Stop polling if the PM never appears (e.g. non Chat-Completion backends).
-            clearInterval(timer);
+            clearInterval(pmWaitTimer);
+            pmWaitTimer = null;
         }
     }, intervalMs);
 }
@@ -661,12 +710,16 @@ jQuery(async () => {
             if (newCharId !== null) lastCharId = newCharId;
             // Invalidate any in-flight restore retry chain from a previous switch.
             const generation = ++restoreGeneration;
-            setTimeout(() => {
+            // Cancel a pending deferred block from a rapid previous switch so they
+            // don't pile up (each one triggers a reinject) when flipping chats fast.
+            if (chatChangedTimer) clearTimeout(chatChangedTimer);
+            chatChangedTimer = setTimeout(() => {
+                chatChangedTimer = null;
                 injectCharPanel();
                 injectContextLockToggle();
                 setupContextLockGuard();
                 debouncedReinject();
-                if (shouldRestore) tryRestore(newCharId, 1, 8, generation);
+                if (shouldRestore) tryRestore(newCharId, 1, 5, generation);
             }, 2000);
         });
 
