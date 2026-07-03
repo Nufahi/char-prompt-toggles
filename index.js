@@ -60,7 +60,7 @@ function saveStorage(data) { localStorage.setItem(STORAGE_KEY, JSON.stringify(da
 // ONCE, instead of clicking each toggle (which forces a full render + save per
 // click and makes big presets crawl).
 function getActiveOrder() {
-    const pm = cachedPromptManager;
+    const pm = getPromptManager();
     if (!pm || typeof pm.getPromptOrderForCharacter !== 'function' || !pm.activeCharacter) return null;
     try {
         const order = pm.getPromptOrderForCharacter(pm.activeCharacter);
@@ -97,7 +97,7 @@ function readTogglesFromDOM() {
 // and never blocks the toolbar/toggles with a render storm.
 // Returns the number of changed toggles, or -1 if the API path is unavailable.
 async function applyTogglesViaAPI(saved) {
-    const pm = cachedPromptManager;
+    const pm = getPromptManager();
     const order = getActiveOrder();
     if (!pm || !order) return -1;
 
@@ -116,7 +116,12 @@ async function applyTogglesViaAPI(saved) {
                 if (counts) order.forEach(e => { if (e && e.identifier in saved) counts[e.identifier] = null; });
             }
         } catch (e) {}
-        if (typeof pm.render === 'function') pm.render();
+        // IMPORTANT: render(false) skips tryGenerate(), which otherwise runs a
+        // full Generate('normal', {}, true) dry-run (prompt build + world-info
+        // scan + token counting). That dry-run is what made restore hang for
+        // ~20s. render(false) only does the cheap DOM refresh — same call ST
+        // itself uses internally.
+        if (typeof pm.render === 'function') pm.render(false);
         if (typeof pm.saveServiceSettings === 'function') { try { await pm.saveServiceSettings(); } catch (e) {} }
     }
     return changed;
@@ -492,20 +497,32 @@ function applySearchFilter() {
 
 /* -- PM: duplicate, delete, row actions -- */
 
-async function resolvePromptManager() {
+let openaiModule = null;
+
+// promptManager is an `export let` live binding in openai.js that starts null
+// and becomes the instance after ST init. So we must read it LAZILY from the
+// module namespace each time — caching the value early would capture null.
+function getPromptManager() {
+    if (openaiModule?.promptManager) return openaiModule.promptManager;
     if (cachedPromptManager) return cachedPromptManager;
+    return null;
+}
+
+async function resolvePromptManager() {
     if (!openaiModulePromise) {
         openaiModulePromise = import('/scripts/openai.js').catch(() => import('../../../openai.js'));
     }
     try {
         const mod = await openaiModulePromise;
-        if (mod?.promptManager) { cachedPromptManager = mod.promptManager; return cachedPromptManager; }
+        if (mod) openaiModule = mod;
+        if (mod?.promptManager) cachedPromptManager = mod.promptManager;
     } catch (e) { console.error('[' + MODULE_NAME + '] cannot resolve promptManager:', e); }
-    return null;
+    return getPromptManager();
 }
 
 function getPromptsArray() {
-    if (cachedPromptManager?.serviceSettings?.prompts) return cachedPromptManager.serviceSettings.prompts;
+    const pm = getPromptManager();
+    if (pm?.serviceSettings?.prompts) return pm.serviceSettings.prompts;
     try { const ctx = SillyTavern.getContext(); if (ctx?.chatCompletionSettings?.prompts) return ctx.chatCompletionSettings.prompts; } catch (e) {}
     return null;
 }
