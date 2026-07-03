@@ -54,6 +54,32 @@ function loadStorage() {
 
 function saveStorage(data) { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); }
 
+// Access the live prompt-order entries ({identifier, enabled}) for the active
+// character. This is the source of truth Prompt Manager itself mutates on every
+// toggle click. Working with it directly lets us change many toggles and render
+// ONCE, instead of clicking each toggle (which forces a full render + save per
+// click and makes big presets crawl).
+function getActiveOrder() {
+    const pm = cachedPromptManager;
+    if (!pm || typeof pm.getPromptOrderForCharacter !== 'function' || !pm.activeCharacter) return null;
+    try {
+        const order = pm.getPromptOrderForCharacter(pm.activeCharacter);
+        return Array.isArray(order) ? order : null;
+    } catch (e) { return null; }
+}
+
+// Read current toggle states. Prefer the PM API (fast, DOM-independent); fall
+// back to scraping the DOM when the API isn't ready yet.
+function readToggles() {
+    const order = getActiveOrder();
+    if (order) {
+        const toggles = {};
+        order.forEach(e => { if (e && e.identifier) toggles[e.identifier] = !!e.enabled; });
+        if (Object.keys(toggles).length) return toggles;
+    }
+    return readTogglesFromDOM();
+}
+
 function readTogglesFromDOM() {
     const toggles = {};
     document.querySelectorAll('[data-pm-identifier]').forEach(el => {
@@ -66,55 +92,65 @@ function readTogglesFromDOM() {
     return toggles;
 }
 
-// Collect the toggle elements whose state must change, without clicking yet.
-function collectTogglesToFlip(saved) {
-    const pending = [];
+// Apply saved toggle states via the PM API: flip only the entries that differ,
+// then render + save exactly once. This is near-instant even for huge presets
+// and never blocks the toolbar/toggles with a render storm.
+// Returns the number of changed toggles, or -1 if the API path is unavailable.
+async function applyTogglesViaAPI(saved) {
+    const pm = cachedPromptManager;
+    const order = getActiveOrder();
+    if (!pm || !order) return -1;
+
+    let changed = 0;
+    order.forEach(e => {
+        if (!e || !e.identifier || !(e.identifier in saved)) return;
+        const want = !!saved[e.identifier];
+        if (!!e.enabled !== want) { e.enabled = want; changed++; }
+    });
+
+    if (changed > 0) {
+        try {
+            if (pm.tokenHandler && typeof pm.tokenHandler.getCounts === 'function') {
+                // Invalidate cached token counts for changed prompts (PM does this per toggle).
+                const counts = pm.tokenHandler.getCounts();
+                if (counts) order.forEach(e => { if (e && e.identifier in saved) counts[e.identifier] = null; });
+            }
+        } catch (e) {}
+        if (typeof pm.render === 'function') pm.render();
+        if (typeof pm.saveServiceSettings === 'function') { try { await pm.saveServiceSettings(); } catch (e) {} }
+    }
+    return changed;
+}
+
+// Fallback (API unavailable): click the differing toggles in one synchronous
+// pass. Simple and fast; only used when the PM API can't be resolved.
+function applyTogglesViaDOM(saved) {
+    let applied = 0;
     document.querySelectorAll('[data-pm-identifier]').forEach(el => {
         const id = el.dataset.pmIdentifier;
         if (!id || !(id in saved)) return;
         const toggle = el.querySelector('.fa-toggle-on, .fa-toggle-off');
         if (!toggle) return;
         const isOn = toggle.classList.contains('fa-toggle-on');
-        if (isOn !== saved[id]) pending.push(toggle);
+        if (isOn !== !!saved[id]) { toggle.click(); applied++; }
     });
-    return pending;
+    return applied;
 }
 
-// Each toggle.click() makes Prompt Manager save settings and re-render the whole
-// list. Doing that synchronously for a big preset freezes the UI (and re-fires
-// our own observer). Instead: pause the observer, click in small rAF batches so
-// the browser can breathe, then resume the observer once at the end.
 let togglesApplyInFlight = false;
-function applyTogglesBatched(saved, onDone) {
-    const pending = collectTogglesToFlip(saved);
-    if (pending.length === 0) { if (onDone) onDone(0); return; }
+async function applyToggles(saved, onDone) {
     if (togglesApplyInFlight) { if (onDone) onDone(0); return; }
     togglesApplyInFlight = true;
-
-    if (pmObserver) pmObserver.disconnect();
-
-    const total = pending.length;
-    const CHUNK = 8;
-    let i = 0;
-
-    const finish = () => {
+    let applied = 0;
+    try {
+        const viaApi = await applyTogglesViaAPI(saved);
+        applied = viaApi === -1 ? applyTogglesViaDOM(saved) : viaApi;
+    } catch (e) {
+        console.error('[' + MODULE_NAME + '] applyToggles failed:', e);
+    } finally {
         togglesApplyInFlight = false;
-        // Resume observing the (re-rendered) PM and re-apply our enhancements once.
-        startPMObserver();
-        injectPMEnhancements();
-        if (onDone) onDone(total);
-    };
-
-    const step = () => {
-        const end = Math.min(i + CHUNK, total);
-        for (; i < end; i++) {
-            const toggle = pending[i];
-            if (toggle && toggle.isConnected) toggle.click();
-        }
-        if (i < total) requestAnimationFrame(step);
-        else finish();
-    };
-    requestAnimationFrame(step);
+    }
+    if (onDone) onDone(applied);
 }
 
 function updateStatus(text) {
@@ -151,7 +187,7 @@ function isReservedKey(key) { return typeof key === 'string' && key.startsWith('
 function doSave() {
     const charId = getCurrentCharId();
     if (!charId || isReservedKey(charId)) { updateStatus('No active character'); return; }
-    const toggles = readTogglesFromDOM();
+    const toggles = readToggles();
     const count = Object.keys(toggles).length;
     if (count === 0) { updateStatus('Toggles not found — open Prompt Manager'); return; }
     const data = loadStorage();
@@ -162,24 +198,39 @@ function doSave() {
 
 function tryRestore(charId, attempt, maxAttempts, generation) {
     attempt = attempt || 1;
-    maxAttempts = maxAttempts || 5;
+    maxAttempts = maxAttempts || 8;
     if (generation === undefined) generation = restoreGeneration;
     // Abort if a newer character switch happened in the meantime.
     if (generation !== restoreGeneration) return;
     if (!charId || isReservedKey(charId)) return;
-    // A batched apply is already running — don't start another on top of it.
+    // An apply is already running — don't start another on top of it.
     if (togglesApplyInFlight) return;
     // Abort if the active character no longer matches the one we're restoring for.
     if (getCurrentCharId() !== charId) return;
-    const toggles = readTogglesFromDOM();
-    if (Object.keys(toggles).length === 0) {
-        if (attempt < maxAttempts) setTimeout(() => tryRestore(charId, attempt + 1, maxAttempts, generation), 1000);
-        return;
-    }
+
     const data = loadStorage();
     if (!data[charId]) return;
     const name = getCharName();
-    applyTogglesBatched(data[charId], (applied) => {
+
+    // Fast path: the PM API is ready — apply instantly via prompt order, no DOM
+    // scraping and a single render. This is what makes the switch feel snappy.
+    if (getActiveOrder()) {
+        applyToggles(data[charId], (applied) => {
+            if (generation !== restoreGeneration) return;
+            if (applied > 0) updateStatus(name + ': auto-restored ' + applied + ' toggles');
+        });
+        return;
+    }
+
+    // API not ready yet (PM not resolved / no active order). Retry a few times;
+    // the DOM fallback inside applyToggles will kick in if toggles are present.
+    const toggles = readTogglesFromDOM();
+    if (Object.keys(toggles).length === 0) {
+        if (attempt < maxAttempts) setTimeout(() => tryRestore(charId, attempt + 1, maxAttempts, generation), 400);
+        return;
+    }
+    applyToggles(data[charId], (applied) => {
+        if (generation !== restoreGeneration) return;
         if (applied > 0) updateStatus(name + ': auto-restored ' + applied + ' toggles');
     });
 }
@@ -203,7 +254,7 @@ function setSelectedProfile(name) {
 
 function profileSave(name) {
     if (!name) return;
-    const toggles = readTogglesFromDOM();
+    const toggles = readToggles();
     if (Object.keys(toggles).length === 0) { toastr.warning('Open Prompt Manager first', MODULE_NAME); return; }
     const profiles = getProfiles();
     profiles[name] = toggles;
@@ -218,7 +269,7 @@ function profileApply(name) {
     const profiles = getProfiles();
     if (!profiles[name]) return;
     setSelectedProfile(name);
-    applyTogglesBatched(profiles[name], (applied) => {
+    applyToggles(profiles[name], (applied) => {
         toastr.info('Profile "' + escapeHtml(name) + '" applied (' + applied + ' changed)', MODULE_NAME);
     });
 }
@@ -710,8 +761,14 @@ jQuery(async () => {
             if (newCharId !== null) lastCharId = newCharId;
             // Invalidate any in-flight restore retry chain from a previous switch.
             const generation = ++restoreGeneration;
-            // Cancel a pending deferred block from a rapid previous switch so they
-            // don't pile up (each one triggers a reinject) when flipping chats fast.
+
+            // Restore toggles ASAP. The API path (getActiveOrder) is DOM-independent,
+            // so we don't wait 2s for the UI — the saved prompts snap in right away.
+            // A tiny delay lets ST finish switching the active character first.
+            if (shouldRestore) setTimeout(() => tryRestore(newCharId, 1, 8, generation), 150);
+
+            // Re-inject our UI (panel, toolbar, lock) — cheap and non-blocking.
+            // Debounced/coalesced so rapid chat flips don't pile up work.
             if (chatChangedTimer) clearTimeout(chatChangedTimer);
             chatChangedTimer = setTimeout(() => {
                 chatChangedTimer = null;
@@ -719,8 +776,7 @@ jQuery(async () => {
                 injectContextLockToggle();
                 setupContextLockGuard();
                 debouncedReinject();
-                if (shouldRestore) tryRestore(newCharId, 1, 5, generation);
-            }, 2000);
+            }, 600);
         });
 
         if (event_types.OAI_PRESET_CHANGED_AFTER) {
