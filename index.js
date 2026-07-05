@@ -208,10 +208,14 @@ function tryRestore(charId, attempt, maxAttempts, generation) {
     // Abort if a newer character switch happened in the meantime.
     if (generation !== restoreGeneration) return;
     if (!charId || isReservedKey(charId)) return;
-    // An apply is already running — don't start another on top of it.
-    if (togglesApplyInFlight) return;
     // Abort if the active character no longer matches the one we're restoring for.
     if (getCurrentCharId() !== charId) return;
+    // An apply is already running — retry shortly instead of dropping the restore,
+    // so a fast char switch during an in-flight apply still ends on the right state.
+    if (togglesApplyInFlight) {
+        if (attempt < maxAttempts) setTimeout(() => tryRestore(charId, attempt + 1, maxAttempts, generation), 200);
+        return;
+    }
 
     const data = loadStorage();
     if (!data[charId]) return;
@@ -325,7 +329,10 @@ function setContextLock(enabled) { setSetting(CTX_LOCK_KEY, enabled); applyConte
 
 function injectContextLockToggle() {
     const cb = document.getElementById('oai_max_context_unlocked');
-    if (!cb || document.getElementById('cpt_lock_context')) return;
+    if (!cb) return;
+    // Icon already present: still re-apply the lock so it re-enforces after a
+    // preset change / re-render replaced the checkbox state under us.
+    if (document.getElementById('cpt_lock_context')) { applyContextLock(); return; }
     const label = cb.closest('label.checkbox_label');
     if (!label) return;
 
@@ -369,11 +376,16 @@ function setupContextLockGuard() {
     if (!cb || cb._cptGuarded) return;
     cb._cptGuarded = true;
     cb.addEventListener('change', () => {
-        // If locked and something tries to check it, revert silently.
-        // Do NOT re-dispatch 'change' here: it re-enters this handler and forces
-        // ST to re-run its own change handler redundantly.
-        if (isContextLockEnabled() && cb.checked) {
+        // If locked and something checks it (user click OR ST loading a preset
+        // that had it on), revert to unchecked AND re-dispatch change so ST's own
+        // handler resets its internal max_context_unlocked flag to false.
+        // Without the re-dispatch the checkbox looks off but ST stays "unlocked".
+        // The _cptReverting guard prevents infinite re-entry.
+        if (isContextLockEnabled() && cb.checked && !cb._cptReverting) {
+            cb._cptReverting = true;
             cb.checked = false;
+            cb.dispatchEvent(new Event('change', { bubbles: true }));
+            cb._cptReverting = false;
         }
     });
 }
@@ -450,7 +462,7 @@ function injectPMToolbar() {
     if (input) {
         input.placeholder = t('Search prompts by name...');
         if (searchQuery) input.value = searchQuery;
-        input.addEventListener('input', () => { searchQuery = input.value; applySearchFilter(); });
+        input.addEventListener('input', () => { searchQuery = input.value; debouncedSearchFilter(); });
     }
     if (clear) {
         clear.title = t('Clear');
@@ -465,17 +477,17 @@ function injectPMToolbar() {
         const name = selectedProfile || document.getElementById('cpt_profile_select')?.value;
         if (name) profileSave(name);
     });
-    toolbar.querySelector('#cpt_profile_new')?.addEventListener('click', () => {
-        const name = window.prompt(t('New profile name'));
+    toolbar.querySelector('#cpt_profile_new')?.addEventListener('click', async () => {
+        const name = await inputDialog(t('New profile name'));
         if (!name || !name.trim()) return;
         profileSave(name.trim());
         setSelectedProfile(name.trim());
         refreshProfileUI();
     });
-    toolbar.querySelector('#cpt_profile_delete')?.addEventListener('click', () => {
+    toolbar.querySelector('#cpt_profile_delete')?.addEventListener('click', async () => {
         const name = selectedProfile || document.getElementById('cpt_profile_select')?.value;
         if (!name) return;
-        if (!window.confirm(t('Delete profile') + ' "' + name + '"?')) return;
+        if (!(await confirmDialog(t('Delete profile'), t('Delete profile') + ' "' + name + '"?'))) return;
         profileDelete(name);
     });
 
@@ -486,14 +498,21 @@ function applySearchFilter() {
     const list = document.getElementById(PM_LIST_ID);
     if (!list) return;
     const q = (searchQuery || '').trim().toLowerCase();
-    list.querySelectorAll('li[data-pm-identifier]').forEach(li => {
-        if (!q) { li.style.display = ''; return; }
+    const rows = list.querySelectorAll('li[data-pm-identifier]');
+    if (!q) { rows.forEach(li => { li.style.display = ''; }); return; }
+    // Build an identifier -> name lookup ONCE instead of a linear find() per row.
+    // On large presets a per-keystroke O(n^2) scan noticeably lagged mobile.
+    const nameById = new Map();
+    const arr = getPromptsArray();
+    if (Array.isArray(arr)) arr.forEach(p => { if (p?.identifier && typeof p.name === 'string') nameById.set(p.identifier, p.name); });
+    rows.forEach(li => {
         const id = li.dataset.pmIdentifier;
-        const p = getPromptById(id);
-        const name = ((p && typeof p.name === 'string') ? p.name : getPromptNameFromDOM(li)).toLowerCase();
+        const name = (nameById.get(id) ?? getPromptNameFromDOM(li)).toLowerCase();
         li.style.display = name.includes(q) ? '' : 'none';
     });
 }
+
+const debouncedSearchFilter = debounce(applySearchFilter, 150);
 
 /* -- PM: duplicate, delete, row actions -- */
 
@@ -559,6 +578,22 @@ async function confirmDialog(title, message) {
     return window.confirm(message);
 }
 
+// Non-blocking text-input dialog via ST's Popup API, with a window.prompt fallback.
+async function inputDialog(message, defaultValue) {
+    try {
+        const ctx = SillyTavern.getContext();
+        if (ctx?.Popup?.show?.input) {
+            const res = await ctx.Popup.show.input(message, '', defaultValue || '');
+            return (res === null || res === false) ? null : res;
+        }
+        if (typeof ctx?.callGenericPopup === 'function' && ctx?.POPUP_TYPE) {
+            const res = await ctx.callGenericPopup(message, ctx.POPUP_TYPE.INPUT, defaultValue || '');
+            return (res === null || res === false) ? null : String(res);
+        }
+    } catch (e) {}
+    return window.prompt(message, defaultValue || '');
+}
+
 async function duplicatePrompt(identifier) {
     if (actionInProgress) return;
     actionInProgress = true;
@@ -588,7 +623,10 @@ async function duplicatePrompt(identifier) {
         }
 
         if (typeof pm.saveServiceSettings === 'function') await pm.saveServiceSettings();
-        if (typeof pm.render === 'function') pm.render();
+        // render(false) skips the tryGenerate() dry-run (prompt build + world-info
+        // scan + token counting) that makes render() hang for ~20s on big presets.
+        // The cheap DOM refresh is all we need after mutating prompts/order.
+        if (typeof pm.render === 'function') pm.render(false);
     } catch (e) { console.error('[' + MODULE_NAME + '] duplicate failed:', e); }
     finally { actionInProgress = false; }
 }
@@ -605,12 +643,26 @@ async function deletePromptById(identifier) {
         if (!(await confirmDialog(t('Delete prompt'), t('Delete prompt') + ' "' + escapeHtml(src.name || identifier) + '"?'))) return;
 
         if (typeof pm.detachPrompt === 'function' && pm.activeCharacter) try { pm.detachPrompt(src, pm.activeCharacter); } catch (e) {}
+        // Remove any lingering prompt_order references in OTHER characters too, so
+        // deleting a prompt doesn't leave dangling identifiers behind in settings.
+        try {
+            const orders = pm.serviceSettings?.prompt_order;
+            if (Array.isArray(orders)) {
+                orders.forEach(entry => {
+                    if (Array.isArray(entry?.order)) {
+                        const i = entry.order.findIndex(e => e?.identifier === identifier);
+                        if (i !== -1) entry.order.splice(i, 1);
+                    }
+                });
+            }
+        } catch (e) {}
         if (Array.isArray(pm.serviceSettings?.prompts)) {
             const idx = pm.serviceSettings.prompts.findIndex(p => p.identifier === identifier);
             if (idx !== -1) pm.serviceSettings.prompts.splice(idx, 1);
         }
         if (typeof pm.saveServiceSettings === 'function') await pm.saveServiceSettings();
-        if (typeof pm.render === 'function') pm.render();
+        // render(false): skip the expensive tryGenerate() dry-run (see duplicatePrompt).
+        if (typeof pm.render === 'function') pm.render(false);
     } catch (e) { console.error('[' + MODULE_NAME + '] delete failed:', e); }
     finally { actionInProgress = false; }
 }
@@ -774,7 +826,13 @@ jQuery(async () => {
             const old = document.getElementById('cpt_char_panel');
             if (old) old.remove();
             const newCharId = getCurrentCharId();
-            const shouldRestore = (lastCharId !== null && newCharId !== null && newCharId !== lastCharId);
+            // Restore whenever we switch INTO a character that differs from the one
+            // we last tracked. lastCharId === null means no char was open yet (e.g.
+            // ST booted to an empty chat), so the first character we open should
+            // still be restored. On a page reload lastCharId was seeded with the
+            // already-open char (see init below), so newCharId === lastCharId there
+            // and we correctly skip — we don't fight ST's own restored state.
+            const shouldRestore = (newCharId !== null && newCharId !== lastCharId);
             if (newCharId !== null) lastCharId = newCharId;
             // Invalidate any in-flight restore retry chain from a previous switch.
             const generation = ++restoreGeneration;
