@@ -1,6 +1,8 @@
 const MODULE_NAME = 'char-prompt-toggles';
-const STORAGE_KEY = 'char_prompt_toggles_data';
-const SETTINGS_KEY = 'char_prompt_toggles_settings';
+// Legacy localStorage keys. Data now lives in ST's extension settings; these are
+// only read once for migration and kept as a write fallback before ST is ready.
+const LEGACY_STORAGE_KEY = 'char_prompt_toggles_data';
+const LEGACY_SETTINGS_KEY = 'char_prompt_toggles_settings';
 
 const PM_CONTAINER_ID = 'completion_prompt_manager';
 const PM_LIST_ID = 'completion_prompt_manager_list';
@@ -18,16 +20,77 @@ let actionInProgress = false;
 let restoreGeneration = 0;
 let pmWaitTimer = null;
 let chatChangedTimer = null;
+// The first CHAT_CHANGED after page load is ST restoring the already-open chat,
+// NOT a character switch. Seeding lastCharId at init can't detect this because
+// ST sets characterId AFTER extensions load, so getCurrentCharId() is still null
+// there and the boot event looked like null -> char (a "switch"), which forcibly
+// overwrote whatever toggles were live. This flag swallows that one event.
+let bootHandled = false;
 
-/* -- Settings persistence -- */
+/* -- Persistence (ST extension settings, with legacy localStorage fallback) -- */
+
+// Root object inside ST's extensionSettings: { data: {...}, settings: {...} }.
+// Using ST settings means the data travels with the user profile and survives a
+// browser cache wipe, unlike the old localStorage-only storage.
+function getExtRoot() {
+    try {
+        const es = SillyTavern.getContext()?.extensionSettings;
+        if (!es) return null;
+        if (!es[MODULE_NAME] || typeof es[MODULE_NAME] !== 'object') es[MODULE_NAME] = {};
+        const root = es[MODULE_NAME];
+        if (!root.data || typeof root.data !== 'object') root.data = {};
+        if (!root.settings || typeof root.settings !== 'object') root.settings = {};
+        return root;
+    } catch (e) { return null; }
+}
+
+function persistExtSettings() {
+    try {
+        const ctx = SillyTavern.getContext();
+        if (typeof ctx?.saveSettingsDebounced === 'function') ctx.saveSettingsDebounced();
+        else if (typeof ctx?.saveSettings === 'function') ctx.saveSettings();
+    } catch (e) {}
+}
+
+function readLegacy(key) {
+    try { const v = JSON.parse(localStorage.getItem(key)); return (v && typeof v === 'object') ? v : null; }
+    catch (e) { return null; }
+}
+
+// One-shot copy of legacy localStorage content into ST settings. Only fills keys
+// that don't exist yet, so it can never clobber newer ST-side data. The legacy
+// entries are intentionally left in place as a manual safety net.
+let migrationDone = false;
+function migrateLegacyStorage() {
+    if (migrationDone) return;
+    const root = getExtRoot();
+    if (!root) return; // ST not ready yet; retry on a later call.
+    migrationDone = true;
+    if (!root._migrated) {
+        const oldData = readLegacy(LEGACY_STORAGE_KEY);
+        if (oldData) for (const k of Object.keys(oldData)) if (!(k in root.data)) root.data[k] = oldData[k];
+        const oldSettings = readLegacy(LEGACY_SETTINGS_KEY);
+        if (oldSettings) for (const k of Object.keys(oldSettings)) if (!(k in root.settings)) root.settings[k] = oldSettings[k];
+        root._migrated = true;
+        persistExtSettings();
+    }
+}
 
 function loadSettings() {
-    try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}; }
-    catch(e) { return {}; }
+    const root = getExtRoot();
+    if (root) { migrateLegacyStorage(); return root.settings; }
+    return readLegacy(LEGACY_SETTINGS_KEY) || {};
 }
-function saveSettings(s) { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); }
+
 function getSetting(key, def) { const s = loadSettings(); return key in s ? s[key] : def; }
-function setSetting(key, val) { const s = loadSettings(); s[key] = val; saveSettings(s); }
+
+function setSetting(key, val) {
+    const root = getExtRoot();
+    if (root) { migrateLegacyStorage(); root.settings[key] = val; persistExtSettings(); return; }
+    const s = readLegacy(LEGACY_SETTINGS_KEY) || {};
+    s[key] = val;
+    try { localStorage.setItem(LEGACY_SETTINGS_KEY, JSON.stringify(s)); } catch (e) {}
+}
 
 /* -- Helpers -- */
 
@@ -48,11 +111,24 @@ function getCharName() {
 }
 
 function loadStorage() {
-    try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}; }
-    catch(e) { return {}; }
+    const root = getExtRoot();
+    if (root) { migrateLegacyStorage(); return root.data; }
+    return readLegacy(LEGACY_STORAGE_KEY) || {};
 }
 
-function saveStorage(data) { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); }
+// loadStorage() returns the live object when ST is ready, so callers that mutate
+// it in place are already correct; this just handles the pre-ST fallback and the
+// actual persist call.
+function saveStorage(data) {
+    const root = getExtRoot();
+    if (root) {
+        migrateLegacyStorage();
+        if (data !== root.data) root.data = data;
+        persistExtSettings();
+        return;
+    }
+    try { localStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify(data)); } catch (e) {}
+}
 
 // Access the live prompt-order entries ({identifier, enabled}) for the active
 // character. This is the source of truth Prompt Manager itself mutates on every
@@ -435,7 +511,22 @@ function injectCharPanel() {
 
 function injectPMToolbar() {
     const list = document.getElementById(PM_LIST_ID);
-    if (!list || document.getElementById(TOOLBAR_ID)) return;
+    if (!list) return;
+
+    // Toolbar survived the re-render (ST replaced only the list node): reuse it
+    // instead of rebuilding, so the search text, caret and focus are preserved
+    // while the user is typing.
+    const existing = document.getElementById(TOOLBAR_ID);
+    if (existing) {
+        if (existing.nextElementSibling !== list && existing.parentElement === list.parentElement) {
+            list.parentElement.insertBefore(existing, list);
+        }
+        return;
+    }
+
+    // Remember whether the search box was focused before a full rebuild.
+    const hadFocus = document.activeElement?.id === SEARCH_INPUT_ID;
+    const prevCaret = hadFocus ? document.activeElement.selectionStart : null;
 
     const t = getTranslator();
     const toolbar = document.createElement('div');
@@ -463,6 +554,11 @@ function injectPMToolbar() {
         input.placeholder = t('Search prompts by name...');
         if (searchQuery) input.value = searchQuery;
         input.addEventListener('input', () => { searchQuery = input.value; debouncedSearchFilter(); });
+        // Restore focus/caret lost to the rebuild.
+        if (hadFocus) {
+            input.focus();
+            if (prevCaret != null) { try { input.setSelectionRange(prevCaret, prevCaret); } catch (e) {} }
+        }
     }
     if (clear) {
         clear.title = t('Clear');
@@ -536,7 +632,67 @@ async function resolvePromptManager() {
         if (mod) openaiModule = mod;
         if (mod?.promptManager) cachedPromptManager = mod.promptManager;
     } catch (e) { console.error('[' + MODULE_NAME + '] cannot resolve promptManager:', e); }
+    patchPromptManagerRender();
     return getPromptManager();
+}
+
+// The promptManager instance is created asynchronously during ST init, so it may
+// still be null right after the module import resolves. Poll briefly until the
+// render patch lands, then stop.
+function ensureRenderPatch() {
+    if (pmRenderPatched) return;
+    let tries = 0;
+    const timer = setInterval(() => {
+        tries++;
+        if (patchPromptManagerRender() || tries > 60) clearInterval(timer);
+    }, 500);
+}
+
+/* -- Render coalescing (the main source of toggle lag) -- */
+
+// ST's PromptManager calls this.render() with no argument on every toggle click,
+// which means afterTryGenerate === true → tryGenerate() → a full dry-run
+// Generate('normal', {}, true): prompt build + world-info scan + token counting.
+// On large presets that is seconds of blocking work PER CLICK.
+//
+// We patch render() itself rather than handleToggle() because handleToggle is
+// re-bound to fresh DOM nodes on every render, so a wrapper there is fragile;
+// every expensive path funnels through render() regardless of caller.
+//
+// Behaviour: do the cheap DOM refresh immediately (instant toggle feedback), and
+// coalesce the expensive tryGenerate pass into a single trailing run once the
+// user stops clicking. Token counts still update, just a beat later.
+const HEAVY_RENDER_DELAY = 700;
+let pmRenderPatched = false;
+let heavyRenderTimer = null;
+
+function patchPromptManagerRender() {
+    const pm = getPromptManager();
+    if (!pm || pmRenderPatched || typeof pm.render !== 'function' || pm._cptRenderPatched) return false;
+
+    const originalRender = pm.render.bind(pm);
+    pm._cptOriginalRender = originalRender;
+    pm._cptRenderPatched = true;
+
+    pm.render = function (afterTryGenerate = true) {
+        // Explicit cheap render (ours, and some of ST's own calls): pass through.
+        // Deliberately does NOT cancel a pending heavy pass — that pass is what
+        // refreshes token counts, and cancelling it here would leave them stale.
+        if (afterTryGenerate === false) return originalRender(false);
+        // Expensive render requested: paint now, defer the dry-run.
+        const result = originalRender(false);
+        if (heavyRenderTimer) clearTimeout(heavyRenderTimer);
+        heavyRenderTimer = setTimeout(() => {
+            heavyRenderTimer = null;
+            // originalRender is the UNpatched function, so this cannot recurse.
+            try { originalRender(true); } catch (e) { console.error('[' + MODULE_NAME + '] deferred render failed:', e); }
+        }, HEAVY_RENDER_DELAY);
+        return result;
+    };
+
+    pmRenderPatched = true;
+    console.log('[' + MODULE_NAME + '] PromptManager.render patched (deferred token pass)');
+    return true;
 }
 
 function getPromptsArray() {
@@ -667,10 +823,33 @@ async function deletePromptById(identifier) {
     finally { actionInProgress = false; }
 }
 
+// Single delegated listener for ALL row actions, attached once to the list.
+// Previously every row got its own two listeners on every re-inject, which on a
+// 150-prompt preset meant hundreds of listener attachments after each render.
+function setupRowActionDelegation(list) {
+    // Flag lives on the node itself: when ST swaps in a fresh list element the
+    // new node has no flag, so delegation re-attaches exactly once per node.
+    if (!list || list._cptDelegated) return;
+    list._cptDelegated = true;
+    list.addEventListener('click', (ev) => {
+        const action = ev.target.closest('.cpt-row-action');
+        if (!action || !list.contains(action)) return;
+        const li = action.closest('li[data-pm-identifier]');
+        const id = li?.dataset.pmIdentifier;
+        if (!id) return;
+        ev.stopPropagation();
+        ev.preventDefault();
+        if (action.classList.contains('cpt-row-duplicate')) duplicatePrompt(id);
+        else if (action.classList.contains('cpt-row-delete')) deletePromptById(id);
+    });
+}
+
 function injectRowActions() {
     const list = document.getElementById(PM_LIST_ID);
     if (!list) return;
     const t = getTranslator();
+
+    setupRowActionDelegation(list);
 
     // Token count spans overlap toggle buttons on mobile — disable their pointer events
     // (same fix as 预设条目更多按钮)
@@ -678,33 +857,33 @@ function injectRowActions() {
         el.style.pointerEvents = 'none';
     });
 
+    // One combined query per row instead of six separate querySelector calls.
+    const dupTitle = t('Duplicate');
+    const delTitle = t('Delete');
     list.querySelectorAll('li.completion_prompt_manager_prompt[data-pm-identifier]').forEach(li => {
-        if (li.querySelector(':scope > .completion_prompt_manager_prompt_name .fa-thumb-tack')) return;
-        if (li.querySelector(':scope > .completion_prompt_manager_prompt_name .fa-star')) return;
-        const isUser = !!li.querySelector(':scope > .completion_prompt_manager_prompt_name .fa-asterisk');
-        const isInjection = !!li.querySelector(':scope > .completion_prompt_manager_prompt_name .fa-syringe');
-        const isSystem = !!li.querySelector(':scope > .completion_prompt_manager_prompt_name .fa-square-poll-horizontal');
-        if (!isUser && !isInjection && !isSystem) return;
         const controls = li.querySelector('.prompt_manager_prompt_controls');
         if (!controls || controls.querySelector('.cpt-row-actions')) return;
-        const id = li.dataset.pmIdentifier;
 
+        const nameEl = li.querySelector(':scope > .completion_prompt_manager_prompt_name');
+        if (!nameEl) return;
+        // Classify the row from a single pass over its marker icons.
+        let isUser = false, isInjection = false, isSystem = false, skip = false;
+        nameEl.querySelectorAll('.fa-thumb-tack, .fa-star, .fa-asterisk, .fa-syringe, .fa-square-poll-horizontal')
+            .forEach(icon => {
+                const cl = icon.classList;
+                if (cl.contains('fa-thumb-tack') || cl.contains('fa-star')) skip = true;
+                else if (cl.contains('fa-asterisk')) isUser = true;
+                else if (cl.contains('fa-syringe')) isInjection = true;
+                else if (cl.contains('fa-square-poll-horizontal')) isSystem = true;
+            });
+        if (skip || (!isUser && !isInjection && !isSystem)) return;
+
+        // Build in one string; clicks are handled by the delegated listener above.
         const wrap = document.createElement('span');
         wrap.className = 'cpt-row-actions';
-
-        const dup = document.createElement('span');
-        dup.className = 'cpt-row-action cpt-row-duplicate fa-solid fa-copy fa-xs';
-        dup.title = t('Duplicate');
-        dup.addEventListener('click', (ev) => { ev.stopPropagation(); duplicatePrompt(id); });
-        wrap.appendChild(dup);
-
-        if (!isSystem) {
-            const del = document.createElement('span');
-            del.className = 'cpt-row-action cpt-row-delete fa-solid fa-trash fa-xs caution';
-            del.title = t('Delete');
-            del.addEventListener('click', (ev) => { ev.stopPropagation(); deletePromptById(id); });
-            wrap.appendChild(del);
-        }
+        wrap.innerHTML =
+            '<span class="cpt-row-action cpt-row-duplicate fa-solid fa-copy fa-xs" title="' + escapeHtml(dupTitle) + '"></span>' +
+            (isSystem ? '' : '<span class="cpt-row-action cpt-row-delete fa-solid fa-trash fa-xs caution" title="' + escapeHtml(delTitle) + '"></span>');
         controls.prepend(wrap);
     });
 }
@@ -812,6 +991,7 @@ jQuery(async () => {
         injectStyles();
         selectedProfile = getSetting('selectedProfile', '');
         resolvePromptManager();
+        ensureRenderPatch();
 
         injectCharPanel();
         injectContextLockToggle();
@@ -826,13 +1006,21 @@ jQuery(async () => {
             const old = document.getElementById('cpt_char_panel');
             if (old) old.remove();
             const newCharId = getCurrentCharId();
-            // Restore whenever we switch INTO a character that differs from the one
-            // we last tracked. lastCharId === null means no char was open yet (e.g.
-            // ST booted to an empty chat), so the first character we open should
-            // still be restored. On a page reload lastCharId was seeded with the
-            // already-open char (see init below), so newCharId === lastCharId there
-            // and we correctly skip — we don't fight ST's own restored state.
-            const shouldRestore = (newCharId !== null && newCharId !== lastCharId);
+
+            // Restore ONLY on a genuine character -> different character switch.
+            //   * bootHandled: the first CHAT_CHANGED is ST restoring the open chat
+            //     on page load, never a switch. Swallow it so a reload never
+            //     overwrites toggles the user tweaked ad-hoc.
+            //   * lastCharId !== null: going from "no character" into a character
+            //     (fresh boot into an empty chat, then opening a card) is also not a
+            //     switch — leave whatever is currently set alone.
+            // Anything that isn't a real switch does zero restore work.
+            const isBoot = !bootHandled;
+            bootHandled = true;
+            const shouldRestore = !isBoot
+                && newCharId !== null
+                && lastCharId !== null
+                && newCharId !== lastCharId;
             if (newCharId !== null) lastCharId = newCharId;
             // Invalidate any in-flight restore retry chain from a previous switch.
             const generation = ++restoreGeneration;
